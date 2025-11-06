@@ -9,13 +9,16 @@ const TARGET_CLIENT_ID = 'android-client-763c5f96-2c94-4c15-a323-d14adcb3b4e8';
 
 // Topik tujuan sesuai dengan yang di-subscribe oleh aplikasi Android
 // const TARGET_TOPIC = `client/${TARGET_CLIENT_ID}/notification`;
-const TARGET_TOPIC = 'pasien/registrasi/ocr';
+// const TARGET_TOPIC = 'ambulans/lokasi/update/78';
+   const TARGET_TOPIC = 'panggilan/darurat/masuk';
 
 const DUMMY_PATIENT_DATA = {
     nama_lengkap: "Budi Santoso Wibowo",
     nik: "3573010101900001", // Ganti NIK ini jika Anda menguji beberapa kali
     tanggal_lahir: "1990-01-01",
-    alamat: "Jl. Ijen No. 25, Kota Malang"
+    alamat: "Jl. Ijen No. 25, Kota Malang",
+    lokasi_latitude:"-7.9700",
+    lokasi_longitude:"112.6300",
 };
 
 const TEST_MESSAGE = {
@@ -31,14 +34,14 @@ const client = mqtt.connect(BROKER_URL);
 
 // Event handler ketika koneksi berhasil
 client.on('connect', () => {
-    console.log('✅ Berhasil terhubung ke Broker MQTT untuk pengujian.');
+    console.log('Berhasil terhubung ke Broker MQTT untuk pengujian.');
 
     // Kirim (publish) pesan ke topik target
     client.publish(TARGET_TOPIC, JSON.stringify(DUMMY_PATIENT_DATA), { qos: 1 }, (error) => {
         if (error) {
-            console.error('❌ Gagal mengirim pesan:', error);
+            console.error('Gagal mengirim pesan:', error);
         } else {
-            console.log(`🚀 Pesan berhasil dikirim ke topik: ${TARGET_TOPIC}`);
+            console.log(`Pesan berhasil dikirim ke topik: ${TARGET_TOPIC}`);
             console.log(`Isi Pesan: ${JSON.stringify(DUMMY_PATIENT_DATA)}`);
         }
 
@@ -49,6 +52,6 @@ client.on('connect', () => {
 
 // Event handler jika terjadi eror koneksi
 client.on('error', (error) => {
-    console.error('❌ Gagal terhubung:', error);
+    console.error('Gagal terhubung:', error);
     client.end();
 });
