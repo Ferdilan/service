@@ -73,16 +73,77 @@ client.on('message', async (topic, message) => {
 
 
 /**
+ * Menangani T1: pasien/registrasi/request
+ * Menyimpan data ke tabel 'pasien'
+ */
+async function handlePatientRegistration(data) {
+    const sql = `
+        INSERT INTO pasien (nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin) 
+        VALUES (?, ?, ?, ?, ?)
+    `;
+    try {
+        const { nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin } = data;
+        if (!nik || !nama_lengkap || !tgl_lahir || !alamat || !jenis_kelamin) {
+            console.error("Data registrasi tidak lengkap. Payload:", data);
+            return;
+        }
+        const [result] = await db.execute(sql, [nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin]);
+        console.log(`Pasien baru berhasil terdaftar dengan ID: ${result.insertId}`);
+    } catch (error) {
+        if (error.code === 'ER_DUP_ENTRY') {
+            console.warn(`Pasien dengan NIK ${data.nik} sudah ada.`);
+        } else {
+            console.error('Gagal menyimpan data pasien:', error);
+        }
+    }
+}
+
+
+/**
+ * Menangani Penyesuaian T5: ambulans/lokasi/update/{id_ambulans}
+ * Memperbarui tabel 'ambulans'
+ */
+async function handleDriverLocationUpdate(driverId, data) { // <-- DEFINISI FUNGSI
+    const sql = `
+        UPDATE ambulans 
+        SET 
+            lokasi_latitude = ?, 
+            lokasi_longitude = ?, 
+            timestamp_update = NOW(),
+            status_operasional = 'ONLINE'
+        WHERE id_ambulans = ?
+    `;
+    try {
+        const { lokasi_latitude, lokasi_longitude } = data;
+        if (lokasi_latitude === undefined || lokasi_longitude === undefined) {
+             console.error(`Data lokasi driver ${driverId} tidak lengkap. Payload:`, data);
+             return;
+        }
+        const [result] = await db.execute(sql, [lokasi_latitude, lokasi_longitude, driverId]);
+        if (result.affectedRows === 0) {
+            console.warn(`Pembaruan lokasi gagal: Driver ID ${driverId} tidak ditemukan.`);
+        } else {
+            console.log(`Lokasi Driver ${driverId} diperbarui.`);
+        }
+    } catch (error) {
+        console.error(`Gagal memperbarui lokasi driver ${driverId}:`, error);
+    }
+}
+
+
+/**
  * Menangani T3: panggilan/darurat/masuk 
  * Inti Logika Hybrid Model (Filter & Refine)
  */
 async function handlePatientRequest(data) {
     // Data payload dari T3: {id_pasien, lokasi_pasien_lat, lokasi_pasien_lon}
     const { id_pasien, lokasi_pasien_lat, lokasi_pasien_lon } = data;
+    if (id_pasien === undefined || lokasi_pasien_lat === undefined || lokasi_pasien_lon === undefined) {
+        console.error("Permintaan darurat tidak lengkap. Payload:", data);
+        return;
+    }
     const patientLocation = { latitude: lokasi_pasien_lat, longitude: lokasi_pasien_lon };
-
     let newCallId;
-    
     try {
         // Langkah 1: Catat panggilan darurat ke DB
         const sqlInsertCall = `
@@ -103,7 +164,7 @@ async function handlePatientRequest(data) {
         const [drivers] = await db.execute(
             `SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
              FROM ambulans 
-             WHERE status_operasional = 'ONLINE'`
+             WHERE status_operasional = 'ONLINE' AND lokasi_latitude IS NOT NULL`
         );
 
         if (drivers.length === 0) {
@@ -179,6 +240,11 @@ async function handlePatientRequest(data) {
 async function handleDriverTaskConfirmation(data) {
     // Payload T7: {id_panggilan, id_ambulans, status}
     const { id_panggilan, id_ambulans, status } = data;
+    if (!id_panggilan || !id_ambulans || !status) {
+         console.error("Data konfirmasi tugas tidak lengkap. Payload:", data);
+         return;
+    }
+
     let newStatusPanggilan = '';
 
     if (status === 'diterima') {
