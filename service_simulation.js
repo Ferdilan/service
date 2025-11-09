@@ -95,9 +95,12 @@ async function handlePatientRequest(data) { // Pastikan 'async' ada
     const { id_pasien, lokasi_pasien_lat, lokasi_pasien_lon } = data;
     
     if (id_pasien === undefined || lokasi_pasien_lat === undefined || lokasi_pasien_lon === undefined) {
-        console.error("❌ Permintaan darurat tidak lengkap.");
+        console.error("Permintaan darurat tidak lengkap.");
         return;
     }
+
+     // Buat ID Panggilan DUMMY untuk simulasi
+    const newCallId = Math.floor(1000 + Math.random() * 9000); // Contoh: 4582
 
     console.log(`[SIMULASI] Memulai perhitungan jarak untuk Pasien ${id_pasien}...`);
     const patientLocation = { latitude: lokasi_pasien_lat, longitude: lokasi_pasien_lon };
@@ -105,7 +108,7 @@ async function handlePatientRequest(data) { // Pastikan 'async' ada
     const availableDrivers = Object.keys(driverLocations);
 
     if (availableDrivers.length === 0) {
-        console.warn('⚠️ SIMULASI GAGAL: Tidak ada data driver di memori.');
+        console.warn('SIMULASI GAGAL: Tidak ada data driver di memori.');
         console.log('Harap jalankan "node test_publisher.js lokasi" terlebih dahulu.');
         return;
     }
@@ -132,7 +135,6 @@ async function handlePatientRequest(data) { // Pastikan 'async' ada
     driversWithDistance.sort((a, b) => a.distanceHaversine - b.distanceHaversine);
     
     // ====================================================================
-    // INILAH BARIS YANG MENYEBABKAN ERROR JIKA HILANG
     // Ambil 3 kandidat teratas (atau kurang jika driver lebih sedikit)
     const candidates = driversWithDistance.slice(0, 3);
     // ====================================================================
@@ -193,9 +195,21 @@ async function handlePatientRequest(data) { // Pastikan 'async' ada
         console.log(`Driver terdekat (Haversine): ${driversWithDistance[0].id}`);
         console.log(`Driver tercepat (ETA Google API): ${bestDriverAPI.id}`);
 
+        const topicBalasan = `panggilan/status/pasien/${id_pasien}`;
+    
+        const payloadBalasan = {
+            status_panggilan: "menuju_lokasi",
+            id_panggilan: newCallId, // Asumsikan 'newCallId' adalah variabel (dummy untuk simulasi)
+            id_ambulans: bestDriverAPI.id,
+            eta_detik: bestDriverAPI.etaSeconds
+        };
+
+        client.publish(topicBalasan, JSON.stringify(payloadBalasan), { qos: 1 });
+        console.log(`Balasan T8 dikirim ke pasien di topik: ${topicBalasan}`);
+
     } catch (e) {
         // Tangani error API Key atau error jaringan
-        console.error(`❌ Gagal memanggil Google Maps API:`, e.response ? e.response.data : e.message);
+        console.error(`Gagal memanggil Google Maps API:`, e.response ? e.response.data : e.message);
         if (e.response && e.response.data.error_message) {
             console.error(`   Pesan Error Google: ${e.response.data.error_message}`);
             console.error(`   ==> Pastikan API Key Anda benar dan billing telah diaktifkan.`);
