@@ -275,7 +275,7 @@ async function _findBestDriver(patientLocation, newCallId) {
     const [drivers] = await db.execute(
         `SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
          FROM ambulans 
-         WHERE status_operasional = 'ONLINE' AND lokasi_latitude IS NOT NULL`
+         WHERE status_operasional = 'Siaga' AND lokasi_latitude IS NOT NULL`
     );
 
     if (drivers.length === 0) {
