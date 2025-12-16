@@ -4,19 +4,20 @@ const db = require('./db.js');
 const { getDistance } = require('geolib');
 const { Client } = require("@googlemaps/google-maps-services-js");
 
+require('dotenv').config();
+
 // Konfigurasi Koneksi
-const BROKER_URL = 'mqtt://hjppbzvg:hjppbzvg:zUg3ysf369ZnibIfjtSc7Qtj-ezmi5IB@mustang.rmq.cloudamqp.com';
-const GOOGLE_MAPS_API_KEY = "AIzaSyCNoOEGNx1eycV5Pc3SvY6a3BrG_fRqvbg"; 
+const BROKER_URL = process.env.MQTT_BROKER_URL;
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 // Konfigurasi Klien
 const client = mqtt.connect(BROKER_URL);
 const gmapsClient = new Client({});
 
 // Definisi Topik
-const TOPIC_REGISTRASI_PASIEN = 'pasien/registrasi/request';            // T1
-const TOPIC_PERMINTAAN_DARURAT = 'panggilan/darurat/masuk';             // T3
-const TOPIC_UPDATE_LOKASI_DRIVER = 'ambulans/lokasi/update/+';          // T5
-const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T7
+const TOPIC_PERMINTAAN_AMBULANS = 'panggilan/masuk';                    // T2
+const TOPIC_UPDATE_LOKASI_DRIVER = 'ambulans/lokasi/update/+';          // T1
+const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T4
 
 // --- KONEKSI MQTT & ROUTER ---
 
@@ -27,11 +28,8 @@ const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T7
 client.on('connect', () => {
     console.log('Service terhubung ke Broker MQTT.');
 
-    client.subscribe(TOPIC_REGISTRASI_PASIEN, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_REGISTRASI_PASIEN}`);
-    });
-    client.subscribe(TOPIC_PERMINTAAN_DARURAT, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_PERMINTAAN_DARURAT}`);
+    client.subscribe(TOPIC_PERMINTAAN_AMBULANS, (err) => {
+        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_PERMINTAAN_AMBULANS}`);
     });
     client.subscribe(TOPIC_UPDATE_LOKASI_DRIVER, (err) => {
         if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_UPDATE_LOKASI_DRIVER}`);
@@ -49,26 +47,20 @@ client.on('connect', () => {
  * @param {Buffer} message - Konten pesan dalam bentuk Buffer.
  */
 client.on('message', async (topic, message) => {
-    let payload;
     try{
         const payload = JSON.parse(message.toString());
         console.log(`\n======================================================`);
         console.log(`Pesan diterima pada topik [${topic}]: ${payload}`);
 
-        // 1. Alur Registrasi Pasien
-        if (topic === TOPIC_REGISTRASI_PASIEN) { // T1 
-            await handlePatientRegistration(payload);
-        }
-
         // 2. Alur Update Lokasi Driver
-         else if (topic.startsWith('ambulans/lokasi/update/')) { // Penyesuaian T5 
+        if (topic.startsWith('ambulans/lokasi/update/')) { // Penyesuaian T5 
             const driverId = topic.split('/')[3]; // ambulans/lokasi/update/{id_ambulans}
             await handleDriverLocationUpdate(driverId, payload);
 
         }
 
         // 3. Alur Panggilan Darurat
-        else if (topic === TOPIC_PERMINTAAN_DARURAT) { // T3
+        else if (topic === TOPIC_PERMINTAAN_AMBULANS) { // T3
             console.log('Menerima permintaan ambulan pasien...');
             await handlePatientRequest(payload);
         }
@@ -96,33 +88,6 @@ client.on('error', (error) => {
 // --- FUNGSI HANDLER (ALUR LOGIKA) ---
 
 /**
- * [ALUR 1 - T1] Menangani registrasi pasien baru.
- * Menerima data dari topik T1 dan menyimpannya ke tabel 'pasien'.
- * @param {object} data - Payload JSON dari T1 (nik, nama_lengkap, dll).
- * @returns {Promise<void>}
- */
-async function handlePatientRegistration(data) {
-    console.log(`[T1] Menerima data registrasi pasien baru...`);
-    const sql = `
-        INSERT INTO pasien (nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin) 
-        VALUES (?, ?, ?, ?, ?)
-    `;
-    try {
-        const { nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin } = data;
-        if (!nik || !nama_lengkap || !tgl_lahir || !alamat || !jenis_kelamin) {
-            console.error("[T1] Data registrasi tidak lengkap. Payload:", data);
-            return;
-        }
-        const [result] = await db.execute(sql, [nik, nama_lengkap, tgl_lahir, alamat, jenis_kelamin]);
-        console.log(`[T1] Pasien baru berhasil terdaftar dengan ID: ${result.insertId}`);
-        // TODO: Kirim balasan ke T2 (pasien/registrasi/respons/{request_id}) //Untuk Login
-    } catch (error) {
-        console.error(`[T1] Gagal menyimpan data pasien:`, error.sqlMessage || error.message);
-    }
-} //End function handlePatientRegistration
-
-
-/**
  * [ALUR 2 - T5] Menangani pembaruan lokasi real-time dari driver.
  * Menerima data dari T5 dan memperbarui tabel 'ambulans' di DB.
  * @param {string} driverId - ID driver yang diekstrak dari topik.
@@ -136,7 +101,6 @@ async function handleDriverLocationUpdate(driverId, data) {
             lokasi_latitude = ?, 
             lokasi_longitude = ?, 
             timestamp_update = NOW(),
-            status_operasional = 'ONLINE'
         WHERE id_ambulans = ?
     `;
     try {
@@ -164,10 +128,13 @@ async function handleDriverLocationUpdate(driverId, data) {
  * @returns {Promise<void>}
  */
 async function handlePatientRequest(data) {
-    console.log(`[T3] Menerima permintaan ambulan pasien...`);
-    const { id_pasien, lokasi_pasien_lat, lokasi_pasien_lon } = data;
-    if (id_pasien === undefined || lokasi_pasien_lat === undefined || lokasi_pasien_lon === undefined) {
-        console.error("[T3] Permintaan darurat tidak lengkap. Payload:", data);
+    // console.log(`[T3] Menerima permintaan ambulan pasien...`);
+    const { id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan} = data;
+    const layanan = jenis_layanan || 'DARURAT';
+    console.log(`[T2] Menerima panggilan ${layanan} dari Pasien ${id_pasien}...`);
+
+    if (!id_pasien || !lokasi_pasien_lat || !lokasi_pasien_lon) {
+        console.error("[T3] Data tidak lengkap. Payload:", data);
         return;
     }
 
@@ -177,30 +144,30 @@ async function handlePatientRequest(data) {
     try {
         // Langkah 1: Catat panggilan darurat ke DB untuk mendapatkan ID
         const sqlInsertCall = `
-            INSERT INTO panggilan_darurat 
-            (id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, status_panggilan, waktu_panggilan)
-            VALUES (?, ?, ?, 'PENDING', NOW())
+            INSERT INTO transaksi_panggilan 
+            (id_pasien, lokasi_pasisen_lat, lokasi_pasien_lon, jenis_layanan, status_panggilan, waktu_panggilan)
+            VALUES (?, ?, ?, ?, 'PENDING', NOW())
         `;
         const [result] = await db.execute(sqlInsertCall, [
             id_pasien,
             lokasi_pasien_lat,
-            lokasi_pasien_lon
+            lokasi_pasien_lon,
+            layanan
         ]);
         newCallId = result.insertId;
-        console.log(`[T3] Panggilan darurat baru (ID: ${newCallId}) dari Pasien ${id_pasien} dicatat di DB.`);
+        console.log(`[T3] Panggilan baru (ID: ${newCallId}) dari Pasien ${id_pasien} tipe ${layanan} dicatat di DB.`);
 
         // Langkah 2: Temukan driver terbaik menggunakan Hybrid Model (Filter + Refine)
         console.log(`[T3] Memulai proses pencarian driver...`);
-        const bestDriver = await _findBestDriver(patientLocation, newCallId);
+        const bestDriver = await _findBestDriver(patientLocation, newCallId, layanan);
 
         // Langkah 3: Tugaskan driver dan kirim notifikasi
         await _assignDriverToCall(bestDriver, newCallId, patientLocation, id_pasien);
 
     }catch (error){
         console.error(`[T3] Gagal memproses permintaan bantuan (ID Panggilan: ${newCallId}):`, error.message);
-        // Jika panggilan sudah dibuat tapi gagal di tengah jalan, update statusnya
         if (newCallId) {
-            await db.execute(`UPDATE panggilan_darurat SET status_panggilan = 'FAILED' WHERE id_panggilan = ?`, [newCallId]);
+            await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'FAILED' WHERE id_panggilan = ?`, [newCallId]).catch(console.error);
         }
     }
 } //End function handlePatientRequest
@@ -213,45 +180,51 @@ async function handlePatientRequest(data) {
  * @returns {Promise<void>}
  */
 async function handleDriverTaskConfirmation(data) {
-    console.log(`[T7] Menerima konfirmasi tugas dari driver...`);
     const { id_panggilan, id_ambulans, status } = data;
-    if (!id_panggilan || !id_ambulans || !status) {
-         console.error("[7] Data konfirmasi tugas tidak lengkap. Payload:", data);
-         return;
-    }
+    console.log(`[T4] Konfirmasi dari Driver ${id_ambulans}: ${status}`);
+    // if (!id_panggilan || !id_ambulans || !status) {
+    //      console.error("[7] Data konfirmasi tugas tidak lengkap. Payload:", data);
+    //      return;
+    // }
 
-    let newStatusPanggilan = '';
-    if (status === 'diterima') {
-        newStatusPanggilan = 'ON_THE_WAY';
-    } else if (status === 'selesai') {
-        newStatusPanggilan = 'COMPLETED';
-    } else {
-        console.warn(`[7] Status konfirmasi tidak dikenal: ${status}`);
-        return;
-    }
+    let newStatusPanggilan = (status === 'diterima') ? 'ON_THE_WAY' : (status === 'selesai' ? 'COMPLETED' : null);
+
+    // let newStatusPanggilan = '';
+    // if (status === 'diterima') {
+    //     newStatusPanggilan = 'ON_THE_WAY';
+    // } else if (status === 'selesai') {
+    //     newStatusPanggilan = 'COMPLETED';
+    // } else {
+    //     console.warn(`[7] Status konfirmasi tidak dikenal: ${status}`);
+    //     return;
+    // }
 
     try {
-        // Update status di DB
-        const [result] = await db.execute(
-            `UPDATE panggilan_darurat SET status_panggilan = ? WHERE id_panggilan = ? AND id_ambulans_respons = ?`,
+        await db.execute(
+            `UPDATE transaksi_panggilan SET status_panggilan = ? WHERE id_panggilan = ? AND id_ambulans_respons = ?`,
             [newStatusPanggilan, id_panggilan, id_ambulans]
         );
 
-        if (result.affectedRows === 0) {
-            console.warn(`[T7] Konfirmasi gagal: Panggilan ${id_panggilan} / Driver ${id_ambulans} tidak cocok.`);
-            return;
+        if (newStatusPanggilan === 'COMPLETED'){
+            await db.execute(`UPDATE ambulans SET status_operasional = 'ONLINE' WHERE id_ambulans = ?`, [id_ambulans]);
+            console.log(`[T4] Driver ${id_ambulans} kembali ONLINE.`);
         }
 
-        console.log(`[T7] Status panggilan ${id_panggilan} diperbarui menjadi ${newStatusPanggilan}`);
+        // if (result.affectedRows === 0) {
+        //     console.warn(`[T7] Konfirmasi gagal: Panggilan ${id_panggilan} / Driver ${id_ambulans} tidak cocok.`);
+        //     return;
+        // }
+
+        // console.log(`[T7] Status panggilan ${id_panggilan} diperbarui menjadi ${newStatusPanggilan}`);
         
-        // Jika tugas selesai, set driver kembali 'ONLINE'
-        if (newStatusPanggilan === 'COMPLETED') {
-            await db.execute(
-                `UPDATE ambulans SET status_operasional = 'ONLINE' WHERE id_ambulans = ?`,
-                [id_ambulans]
-            );
-            console.log(`[T7] Driver ${id_ambulans} kembali ONLINE.`);
-        }
+        // // Jika tugas selesai, set driver kembali 'ONLINE'
+        // if (newStatusPanggilan === 'COMPLETED') {
+        //     await db.execute(
+        //         `UPDATE ambulans SET status_operasional = 'ONLINE' WHERE id_ambulans = ?`,
+        //         [id_ambulans]
+        //     );
+        //     console.log(`[T7] Driver ${id_ambulans} kembali ONLINE.`);
+        // }
         
         // TODO: Kirim pembaruan ke pasien melalui T8  (panggilan/status/{id_panggilan})
 
@@ -270,17 +243,29 @@ async function handleDriverTaskConfirmation(data) {
  * @returns {Promise<object>} Objek driver terbaik yang berisi { id, etaSeconds }.
  * @throws {Error} Jika tidak ada driver yang ditemukan atau API gagal.
  */
-async function _findBestDriver(patientLocation, newCallId) {
+async function _findBestDriver(patientLocation, newCallId, jenisLayanan) {
+
+    // logika klasifikasi armada
+    let targetKategori = 'PSC';
+    if  (jenisLayanan === 'TRANSPORT'){
+        targetKategori = 'RELAWAN'
+    }
+
+    console.log(`[Filter] Mencari armada kategori ${targetKategori} untuk layanan ${jenisLayanan}`);
+
     // 1. Ambil driver dari DB
     const [drivers] = await db.execute(
         `SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
-         FROM ambulans 
-         WHERE status_operasional = 'Siaga' AND lokasi_latitude IS NOT NULL`
+         FROM ambulans
+         WHERE status_operasional = 'Aktif' 
+         AND kategori_armada = ?
+         AND lokasi_latitude IS NOT NULL`,
+        [targetKategori]
     );
 
     if (drivers.length === 0) {
-        await db.execute(`UPDATE panggilan_darurat SET status_panggilan = 'NO_DRIVERS' WHERE id_panggilan = ?`, [newCallId]);
-        throw new Error("Tidak ada driver yang online.");
+        await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'NO_DRIVERS' WHERE id_panggilan = ?`, [newCallId]);
+        throw new Error(`Tidak ada armada ${targetKategori} yang online.`);
     }
 
     // 2. TAHAP 1: FILTER (Haversine & Euclidean)
@@ -328,7 +313,7 @@ async function _findBestDriver(patientLocation, newCallId) {
     });
 
     if (results.length === 0) {
-        await db.execute(`UPDATE panggilan_darurat SET status_panggilan = 'API_FAILED' WHERE id_panggilan = ?`, [newCallId]);
+        await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'API_FAILED' WHERE id_panggilan = ?`, [newCallId]);
         throw new Error("Gagal mendapatkan hasil ETA dari Google.");
     }
 
@@ -354,7 +339,7 @@ async function _findBestDriver(patientLocation, newCallId) {
 async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasien) {
     // 1. Update DB: Tugaskan driver ke panggilan
     await db.execute(
-        `UPDATE panggilan_darurat SET id_ambulans_respons = ?, status_panggilan = 'ASSIGNED' WHERE id_panggilan = ?`,
+        `UPDATE transaksi_panggilan SET id_ambulans_respons = ?, status_panggilan = 'ASSIGNED' WHERE id_panggilan = ?`,
         [bestDriver.id, callId]
     );
 

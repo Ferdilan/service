@@ -1,0 +1,8 @@
+# File environment (rahasia)
+.env
+
+# Dependensi Node.js
+node_modules/
+
+# File log
+*.log
