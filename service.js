@@ -19,6 +19,9 @@ const TOPIC_PERMINTAAN_AMBULANS = 'panggilan/masuk';                    // T2
 const TOPIC_UPDATE_LOKASI_DRIVER = 'ambulans/lokasi/update/+';          // T1
 const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T4
 
+// Menyimpan daftar driver yang menolak panggilan
+const rejectedDriversMap = {};
+
 // --- KONEKSI MQTT & ROUTER ---
 
 /**
@@ -101,6 +104,10 @@ async function handleDriverLocationUpdate(driverId, data) {
             lokasi_latitude = ?, 
             lokasi_longitude = ?, 
             timestamp_update = NOW(),
+            status_operasional = CASE
+                WHEN status_operasional = 'OFFLINE' THEN 'AVAILABLE'
+                ELSE status_operasional
+            END
         WHERE id_ambulans = ?
     `;
     try {
@@ -145,7 +152,7 @@ async function handlePatientRequest(data) {
         // Langkah 1: Catat panggilan darurat ke DB untuk mendapatkan ID
         const sqlInsertCall = `
             INSERT INTO transaksi_panggilan 
-            (id_pasien, lokasi_pasisen_lat, lokasi_pasien_lon, jenis_layanan, status_panggilan, waktu_panggilan)
+            (id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan, status_panggilan, waktu_panggilan)
             VALUES (?, ?, ?, ?, 'PENDING', NOW())
         `;
         const [result] = await db.execute(sqlInsertCall, [
@@ -180,56 +187,115 @@ async function handlePatientRequest(data) {
  * @returns {Promise<void>}
  */
 async function handleDriverTaskConfirmation(data) {
-    const { id_panggilan, id_ambulans, status } = data;
-    console.log(`[T4] Konfirmasi dari Driver ${id_ambulans}: ${status}`);
-    // if (!id_panggilan || !id_ambulans || !status) {
-    //      console.error("[7] Data konfirmasi tugas tidak lengkap. Payload:", data);
-    //      return;
-    // }
+    // 1. EKSTRAKSI DATA & HANDLING MISMATCH
+    const id_panggilan = data.id_panggilan;
+    const status = data.status;
 
-    let newStatusPanggilan = (status === 'diterima') ? 'ON_THE_WAY' : (status === 'selesai' ? 'COMPLETED' : null);
+    // Perbaikan Kritis: Mapping id_driver dari Android ke id_ambulans Server
+    const id_ambulans = data.id_driver || data.id_ambulans;
 
-    // let newStatusPanggilan = '';
-    // if (status === 'diterima') {
-    //     newStatusPanggilan = 'ON_THE_WAY';
-    // } else if (status === 'selesai') {
-    //     newStatusPanggilan = 'COMPLETED';
-    // } else {
-    //     console.warn(`[7] Status konfirmasi tidak dikenal: ${status}`);
-    //     return;
-    // }
+    console.log(`[T7] Konfirmasi dari Driver ${id_ambulans}: ${status}`);
+    
+    // Validasi Data
+    if (!id_panggilan || !id_ambulans || !status) {
+         console.error("[T7] Data konfirmasi tugas tidak lengkap. Payload:", data);
+         return;
+    }
+    
+    try{
+        // Skenario A: Diterima
+        if (status == 'diterima'){
+            // Update status menjadi OTW
+            await db.execute(
+                `UPDATE transaksi_panggilan SET status_panggilan = 'ON_THE_WAY', id_ambulans_respons = ? WHERE id_panggilan = ?`,
+                [id_ambulans, id_panggilan]
+            );
 
-    try {
-        await db.execute(
-            `UPDATE transaksi_panggilan SET status_panggilan = ? WHERE id_panggilan = ? AND id_ambulans_respons = ?`,
-            [newStatusPanggilan, id_panggilan, id_ambulans]
-        );
+            // Hapus data penolakan dari memori agar bersih
+            if (rejectedDriversMap[id_panggilan]) delete rejectedDriversMap[id_panggilan];
 
-        if (newStatusPanggilan === 'COMPLETED'){
-            await db.execute(`UPDATE ambulans SET status_operasional = 'ONLINE' WHERE id_ambulans = ?`, [id_ambulans]);
-            console.log(`[T4] Driver ${id_ambulans} kembali ONLINE.`);
+            console.log('[T7] Driver ${id_panggilan}  MENERIMA TUGAS');
+
+            // TODO: kirim notifikasi ke pasien bahwa driver sedang menuju lokasi
         }
 
-        // if (result.affectedRows === 0) {
-        //     console.warn(`[T7] Konfirmasi gagal: Panggilan ${id_panggilan} / Driver ${id_ambulans} tidak cocok.`);
-        //     return;
-        // }
+        // Skenario B: Ditolak (re-dispathcing)
+        else if (status === 'ditolak'){
 
-        // console.log(`[T7] Status panggilan ${id_panggilan} diperbarui menjadi ${newStatusPanggilan}`);
-        
-        // // Jika tugas selesai, set driver kembali 'ONLINE'
-        // if (newStatusPanggilan === 'COMPLETED') {
-        //     await db.execute(
-        //         `UPDATE ambulans SET status_operasional = 'ONLINE' WHERE id_ambulans = ?`,
-        //         [id_ambulans]
-        //     );
-        //     console.log(`[T7] Driver ${id_ambulans} kembali ONLINE.`);
-        // }
-        
-        // TODO: Kirim pembaruan ke pasien melalui T8  (panggilan/status/{id_panggilan})
+            // 1. Validasi Kritis: Tanpa id_panggilan, kita tidak bisa mencari di DB
+            if (!id_panggilan) {
+                console.error("Eror Fatal: Driver menolak, tapi 'id_panggilan' tidak dikirim oleh Android!");
+                return; // Hentikan proses agar server tidak crash
+            }
 
+            console.warn(`[T7] Driver ${id_ambulans} MENOLAK tugas # ${id_panggilan}.`);
+
+            // 2. Inisialisasi daftar penolakan jika belum ada
+            if (!Array.isArray(rejectedDriversMap[id_panggilan])) {
+                rejectedDriversMap[id_panggilan] = [];
+            }
+
+            // 1. Kembalikan status driver penolak menjadi 'siaga'
+            // await db.execute(`UPDATE ambulans SET status_operasional = 'Siaga' WHERE id_ambulans = ?`, [id_ambulans]);
+
+            // 3. Masukkan ke daftar hitam (Blacklist) untuk panggilan ini
+            if (!rejectedDriversMap[id_panggilan].includes(id_ambulans)){
+                rejectedDriversMap[id_panggilan].push(id_ambulans);
+            }
+
+            try{
+
+            // 4. Ambil data panggilan dari DB (Ambil jenis_layanan & lokasi) 
+            const [callData] = await db.execute(
+                `SELECT lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan, id_pasien FROM transaksi_panggilan WHERE id_panggilan = ?`,
+                [id_panggilan]
+            );
+
+            if (callData.length > 0){
+                const row = callData[0];   
+
+                const dataPasien = callData[0];
+                const patientLocation = { 
+                    latitude: parseFloat(row.lokasi_pasien_lat),
+                    longitude: parseFloat(row.lokasi_pasien_lon)
+                };
+
+                // Validasi: Jika koordinat NaN, jangan lanjutkan
+                if (isNaN(patientLocation.latitude) || isNaN(patientLocation.longitude)) {
+                    throw new Error(`Koordinat pasien untuk panggilan # ${id_panggilan} tidak valid/kosong di DB.`);
+                }
+
+                // 5. Jalankan Algoritma Seleksi Ulang (Pencarian Driver Terdekat Berikutnya)
+                const nextBestDriver = await _findBestDriver(
+                    patientLocation,
+                    id_panggilan,
+                    dataPasien.jenis_layanan,
+                    rejectedDriversMap[id_panggilan] //kirim daftar penolak
+                );
+
+                console.log(`Kandidat penggant ditemukan: Driver ${nextBestDriver.id}`);
+
+                // 6. Tugaskan driver baru
+                await _assignDriverToCall(nextBestDriver, id_panggilan, patientLocation, dataPasien.id_pasien);
+            }
+        } catch (errFind) {
+            console.error(`Gagal mencari pengganti: ${errFind.message}`);
+            // Opsinal: update status mejadi FAILED jika tidak ada driver lagi
+            }
+        }
+
+        // Skenario C: Selesai
+        else if (status === 'selesai') {
+            // Update status panggilan menjadi COMPLETED
+            await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'COMPLETED' WHERE id_panggilan = ?`, [id_panggilan]);
+            
+            // Set driver kembali 'Siaga' (atau 'ONLINE' tergantung ENUM database Anda)
+            await db.execute(`UPDATE ambulans SET status_operasional = 'Siaga' WHERE id_ambulans = ?`, [id_ambulans]);
+            
+            console.log(`[T7] Tugas Selesai. Driver ${id_ambulans} kembali SIAGA.`);
+        }
     } catch (error) {
-        console.error(`Gagal memproses konfirmasi T7:`, error.sqlMessage || error.message);
+        console.error(`Gagal memproses konfirmasi T7:`, error.message);
     }
 } //End function handleDriverTaskConfirmation
 
@@ -243,39 +309,53 @@ async function handleDriverTaskConfirmation(data) {
  * @returns {Promise<object>} Objek driver terbaik yang berisi { id, etaSeconds }.
  * @throws {Error} Jika tidak ada driver yang ditemukan atau API gagal.
  */
-async function _findBestDriver(patientLocation, newCallId, jenisLayanan) {
+async function _findBestDriver(patientLocation, newCallId, jenisLayanan, excludedDriverIds = []) {
 
     // logika klasifikasi armada
-    let targetKategori = 'PSC';
-    if  (jenisLayanan === 'TRANSPORT'){
-        targetKategori = 'RELAWAN'
-    }
+    let targetKategori = (jenisLayanan === 'TRANSPORT') ? 'RELAWAN' : 'PSC';
 
     console.log(`[Filter] Mencari armada kategori ${targetKategori} untuk layanan ${jenisLayanan}`);
 
+    // Gunakan safeBlacklist agar tidak crash
+    const safeBlacklist = Array.isArray(excludedDriverIds) ? excludedDriverIds : [];
+
+    // Gunakan status 'Siaga' sesuai proposal untuk driver yang siap bertugas [cite: 443]
+    const sqlGetDrivers = `
+        SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
+        FROM ambulans 
+        WHERE status_operasional = 'Aktif'
+          AND lokasi_latitude IS NOT NULL
+          AND kategori_armada = ? 
+    `;
+
+
     // 1. Ambil driver dari DB
-    const [drivers] = await db.execute(
-        `SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
-         FROM ambulans
-         WHERE status_operasional = 'Aktif' 
-         AND kategori_armada = ?
-         AND lokasi_latitude IS NOT NULL`,
-        [targetKategori]
-    );
+    const [drivers] = await db.execute(sqlGetDrivers, [targetKategori]);
 
     if (drivers.length === 0) {
         await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'NO_DRIVERS' WHERE id_panggilan = ?`, [newCallId]);
         throw new Error(`Tidak ada armada ${targetKategori} yang online.`);
     }
 
-    // 2. TAHAP 1: FILTER (Haversine & Euclidean)
-    console.log(`--- [T3] TAHAP 1: FILTER (Haversine & Euclidean) ---`);
-    const driversWithDistance = drivers.map(driver => {
+    // Membuang driver yang ada di daftar 'excludeDriverIds'
+    const validDrivers = drivers.filter(driver => 
+        !safeBlacklist.includes(driver.id_ambulans) && 
+        !safeBlacklist.includes(String(driver.id_ambulans))
+    );
+
+    if (validDrivers.length === 0) {
+        // Jika semua driver menolak atau tidak ada driver
+        await db.execute(`UPDATE transaksi_panggilan SET status_panggilan = 'NO_DRIVERS_AVAILABLE' WHERE id_panggilan = ?`, [newCallId]);
+        throw new Error(`Tidak ada driver ${targetCategory} yang tersedia (semua menolak/sibuk).`);
+    }
+
+    // 2. TAHAP 1: FILTER (Haversine)
+    console.log(`--- [T3] TAHAP 1: FILTER (Haversine) ---`);
+        const driversWithDistance = validDrivers.map(driver => {
         const driverLocation = { latitude: driver.lokasi_latitude, longitude: driver.lokasi_longitude };
         const distanceHaversine = getDistance(patientLocation, driverLocation);
-        const distanceEuclidean = getEuclideanDistance(patientLocation, driverLocation);
         
-        console.log(`  -> Driver ${driver.id_ambulans} | Haversine: ${distanceHaversine} m | Euclidean: ${distanceEuclidean.toFixed(5)} "unit"`);
+        console.log(`  -> Driver ${driver.id_ambulans} | Haversine: ${distanceHaversine} m`);
         
         return { 
             id: driver.id_ambulans, 
@@ -298,7 +378,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan) {
         params: { key: GOOGLE_MAPS_API_KEY, origins: origins, destinations: destinations, travelMode: 'DRIVING' }
     });
 
-    console.log(`--- [T3] HASIL RISET PERBANDINGAN LENGKAP ---`);
+    console.log(`--- [T3] HASIL PERHITUNGAN---`);
     const results = [];
     apiResponse.data.rows[0].elements.forEach((element, index) => {
         const candidate = candidates[index];
@@ -374,16 +454,3 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
     client.publish(topicBalasanPasien, payloadString, { qos: 1 });
     console.log(`[T8] Balasan dikirim ke ${topicBalasan} dan ${topicBalasanPasien}`);
 } //End _assignDriverToCall
-
-
-/**
- * [HELPER] Menghitung Jarak Euclidean (Metode Riset)
- * @param {object} patientLoc - Objek { latitude, longitude }.
- * @param {object} driverLoc - Objek { latitude, longitude }.
- * @returns {number} Jarak dalam "unit" lintang/bujur.
- */
-function getEuclideanDistance(patientLoc, driverLoc) {
-    const latDiff = patientLoc.latitude - driverLoc.latitude;
-    const lonDiff = patientLoc.longitude - driverLoc.longitude;
-    return Math.sqrt(Math.pow(latDiff, 2) + Math.pow(lonDiff, 2));
-}
