@@ -3,6 +3,7 @@ const mqtt = require('mqtt');
 const db = require('./db.js');
 const { getDistance } = require('geolib');
 const { Client } = require("@googlemaps/google-maps-services-js");
+const { Client: PgClient } = require('pg');
 
 require('dotenv').config();
 
@@ -13,6 +14,34 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 // Konfigurasi Klien
 const client = mqtt.connect(BROKER_URL);
 const gmapsClient = new Client({});
+
+// Koneksi ke Neon DB
+const pgClient = new PgClient({ connectionString: process.env.DATABASE_URL });
+
+async function listenToDatabaseChanges() {
+    try {
+        await pgClient.connect();
+        console.log("[DB] Terhubung ke Neon. Mulai mendengarkan saluran Postgres...");
+        // 1. Perintahkan Node.js untuk mendengarkan saluran dari Postgres
+        await pgClient.query('LISTEN status_ambulans_channel');
+        // 2. Tangkap event ketika Trigger dari Postgres mengeksekusi Notify
+        pgClient.on('notification', (msg) => {
+            if (msg.channel === 'status_ambulans_channel') {
+                const data = JSON.parse(msg.payload);
+                console.log(`[REAL-TIME] Status Ambulans ${data.id_ambulans} berubah menjadi ${data.status_baru}`);
+                // 3. TERUSKAN KE ANDROID VIA MQTT!
+                const topic = `ambulans/status/sinkronisasi/${data.id_ambulans}`;
+
+                // Gunakan variabel 'client' (karena ini inisialisasi MQTT di service.js Anda)
+                client.publish(topic, JSON.stringify(data), { qos: 1 });
+            }
+        });
+    } catch (err) {
+        console.error("Gagal menjalankan Listener Postgres: ", err);
+    }
+}
+// Jalankan fungsi tersebutambulans/status/update
+listenToDatabaseChanges();
 
 // Definisi Topik
 const TOPIC_PERMINTAAN_AMBULANS = 'panggilan/masuk';                    // T2
@@ -40,6 +69,9 @@ client.on('connect', () => {
     });
     client.subscribe(TOPIC_KONFIRMASI_TUGAS_DRIVER, (err) => {
         if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_KONFIRMASI_TUGAS_DRIVER}`);
+    });
+    client.subscribe(TOPIC_UPDATE_STATUS_OPERASIONAL, (err) => {
+        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_UPDATE_STATUS_OPERASIONAL}`);
     });
 }); // End Client Connect
 
@@ -347,7 +379,7 @@ async function handleDriverTaskConfirmation(data) {
                 console.log(`[T8] Notifikasi SELESAI dikirim ke Pasien: ${topicBalasanPasien}`);
             }
 
-            console.log(`[T7] Tugas Selesai. Driver ${id_ambulans} kembali AVAILABLE.`);
+            console.log(`[T7] Tugas Selesai. Driver ${id_ambulans} kembali available.`);
 
 
         }
@@ -372,8 +404,8 @@ async function handleOperationalStatusUpdate(data) {
 
     try {
         await db.query(
-            `UPDATE ambulans SET status_operasional = ? WHERE id_ambulans = $1`,
-            [status_baru, id_ambulans]
+            `UPDATE ambulans SET status_operasional = $1 WHERE id_ambulans = $2`,
+            [status_baru.toUpperCase(), id_ambulans]
         );
         console.log(`[T6] Status Driver ${id_ambulans} diubah manual menjadi: ${status_baru}`);
     } catch (error) {
@@ -556,6 +588,61 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
     };
     client.publish(topicTugas, JSON.stringify(payloadTugas), { qos: 1 });
     console.log(`[T3] Penawaran Tugas dikirim ke topik ${topicTugas}`);
+
+    // Di dalam fungsi _assignDriverToCall, setelah mengirim MQTT tugas:
+    setTimeout(async () => {
+        try {
+            // Cek status panggilan saat ini di database
+            const result = await db.query(
+                `SELECT status_panggilan, jenis_layanan, id_ambulans_respons FROM transaksi_panggilan WHERE id_panggilan = $1`,
+                [callId]
+            );
+
+            if (result.rows.length > 0) {
+                const callData = result.rows[0];
+                const currentStatus = callData.status_panggilan;
+                const assignedDriver = callData.id_ambulans_respons;
+
+                // Jika setelah 20 detik statusnya masih WAITING_FOR_DRIVER (belum diterima/ditolak manual) dan driver belum dialihkan
+                if (currentStatus === 'WAITING_FOR_DRIVER' && assignedDriver == bestDriver.id) {
+                    console.log(`[TIMEOUT] Driver ${bestDriver.id} tidak merespons dalam 20 detik. Meneruskan ke driver lain...`);
+
+                    // 1. Tambah driver ini ke rejectedDriversMap
+                    if (!Array.isArray(rejectedDriversMap[callId])) {
+                        rejectedDriversMap[callId] = [];
+                    }
+                    if (!rejectedDriversMap[callId].includes(bestDriver.id)) {
+                        rejectedDriversMap[callId].push(bestDriver.id);
+                    }
+
+                    try {
+                        // 2. Cari nextBestDriver lagi seperti di blok "ditolak"
+                        const nextBestDriver = await _findBestDriver(
+                            patientLocation,
+                            callId,
+                            callData.jenis_layanan,
+                            rejectedDriversMap[callId]
+                        );
+
+                        console.log(`[TIMEOUT] Kandidat pengganti ditemukan: Driver ${nextBestDriver.id}`);
+
+                        // 3. Panggil ulang _assignDriverToCall dengan driver yang baru
+                        await _assignDriverToCall(nextBestDriver, callId, patientLocation, id_pasien);
+                    } catch (errFind) {
+                        console.error(`[TIMEOUT] Gagal mencari pengganti: ${errFind.message}`);
+                        // Jika tidak ada driver lain lagi, beritahu pasien
+                        const topicBalasanPasien = `panggilan/status/pasien/${id_pasien}`;
+                        client.publish(topicBalasanPasien, JSON.stringify({ status_panggilan: "ditolak" }), { qos: 1 });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Gagal melakukan pengecekan timeout:", err);
+        }
+    }, 20000); // 20000 ms = 20 detik
+
+
+
 
     // // 4. Kirim T5: Notifikasi status ke pasien
     // const topicBalasan = `panggilan/status/${callId}`;
