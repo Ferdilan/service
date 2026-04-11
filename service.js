@@ -550,8 +550,9 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
     console.log(`[T3] Driver ${bestDriver.id} DITAWARI tugas panggilan ${callId}. Menunggu konfirmasi...`);
 
     try {
+        console.log(`[T3-DB] Mencoba update panggilan ${callId} ke driver ${bestDriver.id}...`);
         await db.query(sqlUpdateCall, [bestDriver.id, callId]);
-        console.log(`[T3] Driver ${bestDriver.id} DITAWARI tugas panggilan ${callId}. Menunggu konfirmasi...`);
+        console.log(`[T3-DB] Update status ${callId} menjadi WAITING_FOR_DRIVER berhasil.`);
 
         // 2. Ambil Nama Pasien dari DB Neon
         const sqlGetPatient = `SELECT nama FROM pasien WHERE id_pasien = $1`;
@@ -561,12 +562,8 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
         if (patientData.rows.length > 0) {
             namaPasien = patientData.rows[0].nama;
         }
-
-        if (patientData.length > 0) {
-            namaPasien = patientData[0].nama_pasien;
-        }
     } catch (err) {
-        // console.error("[T3] Gagal mengambil nama pasien:", err.message);
+        console.error("[T3] ERROR SAAT UPDATE DB DI _assignDriverToCall:", err);
     }
 
     // 2. Update DB: Set status driver menjadi 'BUSY'
@@ -659,3 +656,26 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
     // // client.publish(topicBalasanPasien, payloadString, { qos: 1 });
     // console.log(`[T5] Balasan dikirim ke ${topicBalasan} dan ${topicBalasanPasien}`);
 } //End _assignDriverToCall
+
+
+// Di Node.js Anda
+client.on('message', async (topic, message) => {
+    if (topic === 'panggilan/batal/pasien') {
+        try {
+            const data = JSON.parse(message);
+
+            // 1. Update Database (Postgres Neon)
+            await db.query("UPDATE transaksi_panggilan SET status_panggilan = 'CANCELLED' WHERE id_panggilan = $1", [data.id_panggilan]);
+            if (data.id_ambulans) {
+                await db.query("UPDATE ambulans SET status_operasional = 'AVAILABLE' WHERE id_ambulans = $1", [data.id_ambulans]);
+
+                // 2. Tembak Kill Signal ke Driver spesifik!
+                client.publish(`ambulans/interupsi/batal/${data.id_ambulans}`, JSON.stringify({
+                    pesan: "Pasien membatalkan pesanan. Silakan kembali bersiaga."
+                }));
+            }
+        } catch (error) {
+            console.error("Gagal memproses pembatalan pasien:", error);
+        }
+    }
+});
