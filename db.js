@@ -23,7 +23,17 @@ const pool = new Pool({
     ssl: {
         rejectUnauthorized: false,
         sslmode: 'verify-full'
-    }
+    },
+    keepAlive: true,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+});
+
+pool.on('error', (err, client) => {
+    console.error('⚠️ [Database] Koneksi terputus dari Neon (Auto-Sleep / Network Drop).');
+    console.error('Detail:', err.message);
+    // Jangan lakukan process.exit(1). 
+    // Biarkan Pool secara otomatis membuat koneksi baru saat ada T2/T5 masuk.
 });
 
 module.exports = {

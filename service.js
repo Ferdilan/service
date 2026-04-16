@@ -48,6 +48,7 @@ const TOPIC_PERMINTAAN_AMBULANS = 'panggilan/masuk';                    // T2
 const TOPIC_UPDATE_LOKASI_DRIVER = 'ambulans/lokasi/update/+';          // T1
 const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T4
 const TOPIC_UPDATE_STATUS_OPERASIONAL = 'ambulans/status/update';       // Topik Tambahan
+const TOPIC_PEMBATALAN_PASIEN = 'panggilan/batal/pasien';               // Topik Pembatalan
 
 // Menyimpan daftar driver yang menolak panggilan
 const rejectedDriversMap = {};
@@ -72,6 +73,9 @@ client.on('connect', () => {
     });
     client.subscribe(TOPIC_UPDATE_STATUS_OPERASIONAL, (err) => {
         if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_UPDATE_STATUS_OPERASIONAL}`);
+    });
+    client.subscribe(TOPIC_PEMBATALAN_PASIEN, (err) => {
+        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_PEMBATALAN_PASIEN}`);
     });
 }); // End Client Connect
 
@@ -110,6 +114,11 @@ client.on('message', async (topic, message) => {
 
         else if (topic === TOPIC_UPDATE_STATUS_OPERASIONAL) { // Topik Tambahan
             await handleOperationalStatusUpdate(payload);
+        }
+
+        // 5. Alur Pembatalan Panggilan dari Pasien
+        else if (topic === TOPIC_PEMBATALAN_PASIEN) {
+            await handlePatientCancellation(payload);
         }
     }
     catch (e) {
@@ -415,6 +424,62 @@ async function handleOperationalStatusUpdate(data) {
 
 
 /**
+ * Menangani pembatalan panggilan yang dikirim oleh pasien.
+ * @param {object} data - Payload JSON yang berisi id_panggilan dan opsional id_ambulans.
+ */
+async function handlePatientCancellation(data) {
+    try {
+        console.log(`[PEMBATALAN] Menerima pembatalan dari pasien untuk panggilan ${data.id_panggilan}`);
+
+        if (!data.id_panggilan) {
+            console.error("[PEMBATALAN] Data pembatalan tidak lengkap (id_panggilan kosong):", data);
+            return;
+        }
+
+        if (data.id_pasien) {
+            // Batal berdasarkan ID Pasien
+            await db.query(`
+                UPDATE transaksi_panggilan 
+                SET status_panggilan = 'CANCELLED' 
+                WHERE id_pasien = $1 
+                AND status_panggilan IN ('PENDING', 'WAITING_FOR_DRIVER', 'ON_THE_WAY')`, [data.id_pasien]);
+        } else if (Number.isInteger(data.id_panggilan) || !isNaN(parseInt(data.id_panggilan))) {
+            // Batal menggunakan Integer asli (Jika tersedia)
+            const validId = parseInt(data.id_panggilan);
+            await db.query("UPDATE transaksi_panggilan SET status_panggilan = 'CANCELLED' WHERE id_panggilan = $1", [validId]);
+        } else {
+            console.error("[PEMBATALAN] Android mengirimkan format teks tetapi tidak memberikan id_pasien");
+            return;
+        }
+
+        // 1. Update Database (Postgres Neon) - Set transaksi menjadi CANCELLED
+        await db.query(
+            "UPDATE transaksi_panggilan SET status_panggilan = 'CANCELLED' WHERE id_panggilan = $1",
+            [data.id_panggilan]
+        );
+
+        // 2. Jika sudah ada driver yang ditugaskan, kembalikan ke AVAILABLE dan beri interupsi
+        if (data.id_ambulans) {
+            await db.query(
+                "UPDATE ambulans SET status_operasional = 'AVAILABLE' WHERE id_ambulans = $1",
+                [data.id_ambulans]
+            );
+
+            // Tembak Kill Signal ke Driver spesifik!
+            const topicInterupsi = `ambulans/interupsi/batal/${data.id_ambulans}`;
+            client.publish(topicInterupsi, JSON.stringify({
+                pesan: "Pasien membatalkan pesanan. Silakan kembali bersiaga."
+            }), { qos: 1 });
+
+            console.log(`[PEMBATALAN] Sinyal batal berhasil dikirim ke armada ${data.id_ambulans}`);
+        }
+    } catch (error) {
+        console.error("[PEMBATALAN] Gagal memproses pembatalan pasien:", error.message);
+    }
+}
+
+
+/**
  * =======================================================
  * FUNGSI HELPER
  * =======================================================
@@ -658,24 +723,3 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
 } //End _assignDriverToCall
 
 
-// Di Node.js Anda
-client.on('message', async (topic, message) => {
-    if (topic === 'panggilan/batal/pasien') {
-        try {
-            const data = JSON.parse(message);
-
-            // 1. Update Database (Postgres Neon)
-            await db.query("UPDATE transaksi_panggilan SET status_panggilan = 'CANCELLED' WHERE id_panggilan = $1", [data.id_panggilan]);
-            if (data.id_ambulans) {
-                await db.query("UPDATE ambulans SET status_operasional = 'AVAILABLE' WHERE id_ambulans = $1", [data.id_ambulans]);
-
-                // 2. Tembak Kill Signal ke Driver spesifik!
-                client.publish(`ambulans/interupsi/batal/${data.id_ambulans}`, JSON.stringify({
-                    pesan: "Pasien membatalkan pesanan. Silakan kembali bersiaga."
-                }));
-            }
-        } catch (error) {
-            console.error("Gagal memproses pembatalan pasien:", error);
-        }
-    }
-});
