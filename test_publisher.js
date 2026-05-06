@@ -33,10 +33,10 @@ switch (testCase) {
         topic = 'ambulans/lokasi/update/80'; // {id_ambulans} = 78 (pastikan ada di DB)
         payload = JSON.stringify({
             "lokasi_latitude": -7.9418384221998455, // Ubah sedikit nilainya setiap tes
-            "lokasi_longitude":  112.61571667358028
+            "lokasi_longitude": 112.61571667358028
         });
         break;
- 
+
     /**
      * TES 2: (T3) Pasien mengirim panggilan darurat.
      * Server (service.js) akan subscribe ke 'panggilan/darurat/masuk'
@@ -44,14 +44,14 @@ switch (testCase) {
      */
     case 'panggil':
         testDescription = "Tes T3 (Panggilan Darurat Masuk)";
-        topic = 'panggilan/darurat/masuk';
+        topic = 'panggilan/masuk';
         payload = JSON.stringify({
-            "id_pasien": 123, // Pastikan id_pasien=123 ada di tabel 'pasien'
-            "lokasi_pasien_lat": -7.9446742,
-            "lokasi_pasien_lon": 112.6163573
+            "id_pasien": 21, // Pastikan id_pasien=123 ada di tabel 'pasien'
+            "lokasi_pasien_lat": -7.935230,
+            "lokasi_pasien_lon": 112.623192
         });
         break;
-    
+
     /**
      * TES 3: (T1) Pasien baru mendaftar.
      * Server (service.js) akan subscribe ke 'pasien/registrasi/request'

@@ -61,10 +61,26 @@ const client = mqtt.connect(BROKER_URL, {
 const gmapsClient = new Client({});
 
 // Koneksi ke Neon DB
-const pgClient = new PgClient({ connectionString: process.env.DATABASE_URL });
+let pgClient = null;
+// const pgClient = new PgClient({ connectionString: process.env.DATABASE_URL });
 
 async function listenToDatabaseChanges() {
     try {
+        // Buat client baru dengan DIRECT URL (tanpa -pooler)
+        pgClient = new PgClient({
+            connectionString: process.env.DATABASE_DIRECT_URL,
+            ssl: { rejectUnauthorized: false }
+        });
+        pgClient.on('error', (err) => {
+            console.error('⚠️ [LISTEN] Koneksi LISTEN terputus:', err.message);
+            pgClient.end().catch(() => { });
+            // Reconnect setelah 5 detik
+            setTimeout(listenToDatabaseChanges, 5000);
+        });
+        pgClient.on('end', () => {
+            console.warn('⚠️ [LISTEN] Koneksi LISTEN ditutup. Reconnect dalam 5 detik...');
+            setTimeout(listenToDatabaseChanges, 5000);
+        });
         await pgClient.connect();
         console.log("[DB] Terhubung ke Neon. Mulai mendengarkan saluran Postgres...");
         // 1. Perintahkan Node.js untuk mendengarkan saluran dari Postgres
