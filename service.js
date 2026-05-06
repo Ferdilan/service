@@ -77,14 +77,29 @@ async function listenToDatabaseChanges() {
             // Reconnect setelah 5 detik
             setTimeout(listenToDatabaseChanges, 5000);
         });
-        pgClient.on('end', () => {
-            console.warn('⚠️ [LISTEN] Koneksi LISTEN ditutup. Reconnect dalam 5 detik...');
-            setTimeout(listenToDatabaseChanges, 5000);
-        });
+        // pgClient.on('end', () => {
+        //     console.warn('⚠️ [LISTEN] Koneksi LISTEN ditutup. Reconnect dalam 5 detik...');
+        //     setTimeout(listenToDatabaseChanges, 5000);
+        // });
         await pgClient.connect();
         console.log("[DB] Terhubung ke Neon. Mulai mendengarkan saluran Postgres...");
         // 1. Perintahkan Node.js untuk mendengarkan saluran dari Postgres
         await pgClient.query('LISTEN status_ambulans_channel');
+        // Keepalive: kirim query setiap 50 detik agar Neon tidak tutup koneksi
+        const keepAliveInterval = setInterval(async () => {
+            try {
+                await pgClient.query('SELECT 1');
+            } catch (e) {
+                clearInterval(keepAliveInterval);
+            }
+        }, 50000);
+        // Bersihkan interval saat koneksi ditutup
+        pgClient.on('end', () => {
+            clearInterval(keepAliveInterval);
+            console.warn('⚠️ [LISTEN] Koneksi LISTEN ditutup. Reconnect dalam 5 detik...');
+            setTimeout(listenToDatabaseChanges, 5000);
+        });
+
         // 2. Tangkap event ketika Trigger dari Postgres mengeksekusi Notify
         pgClient.on('notification', (msg) => {
             if (msg.channel === 'status_ambulans_channel') {
