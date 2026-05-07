@@ -88,7 +88,7 @@ async function listenToDatabaseChanges() {
         // Keepalive: kirim query setiap 50 detik agar Neon tidak tutup koneksi
         const keepAliveInterval = setInterval(async () => {
             try {
-                await pgClient.query('SELECT 1');
+                await db.query('SELECT 1');
             } catch (e) {
                 clearInterval(keepAliveInterval);
             }

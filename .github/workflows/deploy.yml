@@ -1,0 +1,38 @@
+name: Deploy Service to VPS
+
+on:
+  push:
+    branches:
+      - main  # Trigger saat push ke branch main
+
+jobs:
+  deploy:
+    name: Deploy Service
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout kode
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Deploy ke VPS via SSH
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            echo "=== Pulling latest code ==="
+            cd /home/ubuntu/service
+            git pull origin main
+
+            echo "=== Installing dependencies ==="
+            npm install --omit=dev
+
+            echo "=== Restarting service ==="
+            pm2 restart ambulance-service --update-env
+            pm2 save
+
+            echo "=== Deploy selesai! ==="
