@@ -36,7 +36,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /home/ubuntu/service
+            cd /home/ubuntu/service 
             # Backup git hash
             git rev-parse HEAD > .deploy_prev_commit || echo "" > .deploy_prev_commit
 
