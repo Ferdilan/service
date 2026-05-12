@@ -663,7 +663,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     });
 
     driversWithDistance.sort((a, b) => a.distanceHaversine - b.distanceHaversine);
-    const candidates = driversWithDistance.slice(0, 3); // Tempat pengambilan 3 kandidat teratas
+    const candidates = driversWithDistance.slice(0, 5); // Tempat pengambilan 5 kandidat teratas
 
     // 3. TAHAP 2: REFINE (Google Maps API)
     console.log(`--- [T2] TAHAP 2: REFINE (Google Maps API) ---`);
