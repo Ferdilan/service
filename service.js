@@ -53,9 +53,8 @@ const MQTT_PASS = process.env.MQTT_PASSWORD || undefined;
 const client = mqtt.connect(BROKER_URL, {
     username: MQTT_USER,
     password: MQTT_PASS,
-    protocol: 'mqtts',
-    port: 8883,
-    rejectUnauthorized: true
+    protocol: 'mqtt',
+    port: 1883
 });
 
 const gmapsClient = new Client({});
