@@ -60,43 +60,71 @@ const client = mqtt.connect(BROKER_URL, {
 
 const gmapsClient = new Client({});
 
-// Koneksi ke Neon DB
+// Koneksi ke Neon DB (LISTEN/NOTIFY)
 let pgClient = null;
-// const pgClient = new PgClient({ connectionString: process.env.DATABASE_URL });
 
-// --- EXPONENTIAL BACKOFF CONFIG ---
+// --- EXPONENTIAL BACKOFF & FAILOVER CONFIG ---
 let listenRetryDelay = 5000;          // Mulai dari 5 detik
 const LISTEN_MAX_RETRY_DELAY = 300000; // Maksimum 5 menit
+let listenUsingBackup = false;         // Apakah LISTEN sedang ke backup?
+
+// Kata kunci error yang menandakan kuota/koneksi Neon habis
+function isNeonUnavailableError(err) {
+    if (!err || !err.message) return false;
+    const msg = err.message.toLowerCase();
+    return (
+        msg.includes('compute time quota') ||
+        msg.includes('project is disabled') ||
+        msg.includes('connection refused') ||
+        msg.includes('econnrefused') ||
+        msg.includes('endpoint is disabled') ||
+        err.code === 'ENOTFOUND' ||
+        err.code === 'ETIMEDOUT'
+    );
+}
 
 function scheduleReconnect() {
     console.log(`🔄 [LISTEN] Reconnect dijadwalkan dalam ${listenRetryDelay / 1000} detik...`);
     setTimeout(listenToDatabaseChanges, listenRetryDelay);
-    // Naikkan delay secara eksponensial: 5s → 10s → 20s → 40s → ... → max 5 menit
     listenRetryDelay = Math.min(listenRetryDelay * 2, LISTEN_MAX_RETRY_DELAY);
 }
 
 async function listenToDatabaseChanges() {
+    // Sinkronkan state LISTEN dengan state db.js
+    const dbStatus = db.getStatus();
+    if (dbStatus.usingBackup && !listenUsingBackup) {
+        console.warn('⚠️  [LISTEN] db.js sudah pakai Backup, LISTEN ikut beralih ke Backup.');
+        listenUsingBackup = true;
+    }
+
+    // Pilih URL berdasarkan state failover
+    const listenUrl = listenUsingBackup
+        ? process.env.DATABASE_DIRECT_URL_BACKUP
+        : process.env.DATABASE_DIRECT_URL;
+
+    const sourceLabel = listenUsingBackup ? 'BACKUP' : 'PRIMARY';
+
     try {
-        // Buat client baru dengan DIRECT URL (tanpa -pooler)
         pgClient = new PgClient({
-            connectionString: process.env.DATABASE_DIRECT_URL,
+            connectionString: listenUrl,
             ssl: { rejectUnauthorized: false }
         });
+
         pgClient.on('error', (err) => {
-            console.error('⚠️ [LISTEN] Koneksi LISTEN terputus:', err.message);
+            console.error(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN terputus:`, err.message);
             pgClient.end().catch(() => { });
             scheduleReconnect();
         });
+
         await pgClient.connect();
 
         // Reset delay ke awal saat berhasil terhubung
         listenRetryDelay = 5000;
-        console.log("[DB] Terhubung ke Neon. Mulai mendengarkan saluran Postgres...");
+        console.log(`✅ [LISTEN-${sourceLabel}] Terhubung. Mendengarkan saluran Postgres...`);
 
-        // 1. Perintahkan Node.js untuk mendengarkan saluran dari Postgres
         await pgClient.query('LISTEN status_ambulans_channel');
 
-        // Keepalive: kirim query setiap 50 detik agar Neon tidak tutup koneksi
+        // Keepalive: kirim query setiap 50 detik agar Neon tidak sleep
         const keepAliveInterval = setInterval(async () => {
             try {
                 await db.query('SELECT 1');
@@ -105,32 +133,38 @@ async function listenToDatabaseChanges() {
             }
         }, 50000);
 
-        // Bersihkan interval dan jadwalkan reconnect saat koneksi ditutup
         pgClient.on('end', () => {
             clearInterval(keepAliveInterval);
-            console.warn('⚠️ [LISTEN] Koneksi LISTEN ditutup.');
+            console.warn(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup.`);
             scheduleReconnect();
         });
 
-        // 2. Tangkap event ketika Trigger dari Postgres mengeksekusi Notify
+        // Tangkap notifikasi dari Postgres trigger
         pgClient.on('notification', (msg) => {
             if (msg.channel === 'status_ambulans_channel') {
                 const data = JSON.parse(msg.payload);
                 console.log(`[REAL-TIME] Status Ambulans ${data.id_ambulans} berubah menjadi ${data.status_baru}`);
-                // 3. TERUSKAN KE ANDROID VIA MQTT!
                 const topic = `ambulans/status/sinkronisasi/${data.id_ambulans}`;
                 client.publish(topic, JSON.stringify(data), { qos: 1 });
             }
         });
+
     } catch (err) {
-        // Deteksi error kuota Neon secara spesifik untuk pesan yang lebih informatif
-        const isQuotaError = err.message && err.message.includes('compute time quota');
-        if (isQuotaError) {
-            console.warn(`⏸️ [LISTEN] Kuota compute time Neon habis. Retry dalam ${listenRetryDelay / 1000} detik...`);
+        const isUnavailable = isNeonUnavailableError(err);
+
+        if (isUnavailable && !listenUsingBackup) {
+            // Primary tidak tersedia → coba backup
+            console.warn(`⏸️ [LISTEN-PRIMARY] Tidak tersedia (${err.message}). Beralih ke BACKUP...`);
+            listenUsingBackup = true;
+            listenRetryDelay = 5000; // Reset delay untuk percobaan backup
+            setTimeout(listenToDatabaseChanges, 2000);
+        } else if (isUnavailable && listenUsingBackup) {
+            console.warn(`⏸️ [LISTEN-BACKUP] Juga tidak tersedia. Retry dalam ${listenRetryDelay / 1000} detik...`);
+            scheduleReconnect();
         } else {
-            console.error('❌ [LISTEN] Gagal menjalankan Listener Postgres:', err.message);
+            console.error(`❌ [LISTEN-${sourceLabel}] Gagal:`, err.message);
+            scheduleReconnect();
         }
-        scheduleReconnect();
     }
 }
 // Jalankan listener saat service pertama kali start

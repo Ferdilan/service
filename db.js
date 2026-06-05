@@ -1,55 +1,155 @@
-// const mysql = require('mysql2/promise');
+// db.js — Neon PostgreSQL dengan Automatic Failover (Primary → Backup)
 const { Pool } = require('pg');
 require('dotenv').config();
 
-// ============ MYSQL ============
-// const pool = mysql.createPool({
-//     host: process.env.DB_HOST || 'localhost',
-//     user: process.env.DB_USER || 'root',
-//     password: process.env.DB_PASSWORD || '',
-//     database: process.env.DB_DATABASE || 'ambulans',
-//     port: process.env.DB_PORT || 3306,
-//     waitForConnections: true,
-//     connectionLimit: 10,
-//     queueLimit: 0,
-//     enableKeepAlive: true,
-//     keepAliveInitialDelay: 0
-// });
+// ============================================================
+// KONFIGURASI POOL
+// ============================================================
+const SSL_CONFIG = { rejectUnauthorized: false };
 
-
-// ============ Neon ============
-const pool = new Pool({
+const primaryPool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false,
-        sslmode: 'verify-full'
-    },
+    ssl: SSL_CONFIG,
     keepAlive: true,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
 });
 
-pool.on('error', (err, client) => {
-    console.error('⚠️ [Database] Koneksi terputus dari Neon (Auto-Sleep / Network Drop).');
-    console.error('Detail:', err.message);
-    // Jangan lakukan process.exit(1). 
-    // Biarkan Pool secara otomatis membuat koneksi baru saat ada T2/T5 masuk.
+const backupPool = new Pool({
+    connectionString: process.env.DATABASE_URL_BACKUP,
+    ssl: SSL_CONFIG,
+    keepAlive: true,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
 
-module.exports = {
-    // Membungkus pool.query agar bisa dipanggil dengan nama 'execute' atau 'query'
-    execute: async (sql, params) => {
-        try {
-            const result = await pool.query(sql, params);
-            // Mengembalikan struktur data yang menyerupai format destructuring MySQL
-            // result.rows adalah array data, result.rowCount adalah jumlah baris terdampak
-            return [result.rows, result.fields, result];
-        } catch (error) {
-            throw error;
+// ============================================================
+// STATE FAILOVER
+// ============================================================
+let usingBackup = false;           // Flag: sedang pakai backup?
+let probeTimer = null;             // Timer untuk coba balik ke primary
+const PROBE_INTERVAL_MS = 10 * 60 * 1000; // Coba balik ke primary setiap 10 menit
+
+// ============================================================
+// DETEKSI ERROR KUOTA / KONEKSI NEON
+// ============================================================
+function isNeonUnavailableError(err) {
+    if (!err || !err.message) return false;
+    const msg = err.message.toLowerCase();
+    return (
+        msg.includes('compute time quota') ||
+        msg.includes('project is disabled') ||
+        msg.includes('connection refused') ||
+        msg.includes('econnrefused') ||
+        msg.includes('endpoint is disabled') ||
+        msg.includes('too many connections') ||
+        msg.includes('connection terminated') ||
+        err.code === 'ENOTFOUND' ||
+        err.code === 'ETIMEDOUT' ||
+        err.code === '57P01' // admin shutdown
+    );
+}
+
+// ============================================================
+// SWITCH KE BACKUP
+// ============================================================
+function switchToBackup(reason) {
+    if (usingBackup) return; // Sudah di backup, tidak perlu switch lagi
+    usingBackup = true;
+    console.warn(`⚠️  [DB-FAILOVER] Beralih ke database BACKUP. Alasan: ${reason}`);
+
+    // Jadwalkan probe: coba balik ke primary setiap 10 menit
+    if (!probeTimer) {
+        probeTimer = setInterval(async () => {
+            console.log('🔍 [DB-FAILOVER] Mencoba koneksi ke Primary kembali...');
+            try {
+                const client = await primaryPool.connect();
+                await client.query('SELECT 1');
+                client.release();
+                // Berhasil → balik ke primary
+                usingBackup = false;
+                clearInterval(probeTimer);
+                probeTimer = null;
+                console.log('✅ [DB-FAILOVER] Primary kembali online! Beralih kembali ke Primary.');
+            } catch (e) {
+                console.log(`⏳ [DB-FAILOVER] Primary masih tidak tersedia: ${e.message}`);
+            }
+        }, PROBE_INTERVAL_MS);
+    }
+}
+
+// ============================================================
+// EVENT HANDLER ERROR POOL
+// ============================================================
+primaryPool.on('error', (err) => {
+    console.error('⚠️  [DB-PRIMARY] Pool error:', err.message);
+    if (isNeonUnavailableError(err)) {
+        switchToBackup(err.message);
+    }
+});
+
+backupPool.on('error', (err) => {
+    console.error('⚠️  [DB-BACKUP] Pool error:', err.message);
+});
+
+// ============================================================
+// FUNGSI QUERY UTAMA (dengan fallback otomatis)
+// ============================================================
+async function runQuery(sql, params) {
+    const activePool = usingBackup ? backupPool : primaryPool;
+
+    try {
+        return await activePool.query(sql, params);
+    } catch (err) {
+        // Jika primary gagal karena kuota/koneksi → switch ke backup dan coba ulang
+        if (!usingBackup && isNeonUnavailableError(err)) {
+            switchToBackup(err.message);
+            console.warn(`🔄 [DB-FAILOVER] Retry query ke Backup...`);
+            return await backupPool.query(sql, params);
         }
+        throw err; // Error lain (SQL syntax, constraint) → lempar ke pemanggil
+    }
+}
+
+// ============================================================
+// EXPORT
+// ============================================================
+module.exports = {
+    /**
+     * Menjalankan query dan mengembalikan format [rows, fields, result]
+     * (kompatibel dengan format MySQL/Sequelize-style yang dipakai service.js)
+     */
+    execute: async (sql, params) => {
+        const result = await runQuery(sql, params);
+        return [result.rows, result.fields, result];
     },
+
+    /**
+     * Menjalankan query dan mengembalikan objek result pg standar
+     */
     query: async (sql, params) => {
-        return await pool.query(sql, params);
+        return await runQuery(sql, params);
     },
-    getPool: () => pool
+
+    /**
+     * Mengembalikan pool yang sedang aktif (primary atau backup)
+     */
+    getPool: () => (usingBackup ? backupPool : primaryPool),
+
+    /**
+     * Mengembalikan status failover saat ini
+     */
+    getStatus: () => ({
+        usingBackup,
+        active: usingBackup ? 'BACKUP' : 'PRIMARY',
+    }),
+
+    /**
+     * Memaksa switch ke backup (untuk kebutuhan testing/manual)
+     */
+    forceBackup: () => switchToBackup('Manual switch'),
+
+    // Expose pools untuk digunakan service.js (LISTEN connection)
+    primaryPool,
+    backupPool,
 };
