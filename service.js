@@ -124,12 +124,12 @@ async function listenToDatabaseChanges() {
 
         await pgClient.query('LISTEN status_ambulans_channel');
 
-        // Keepalive: kirim query setiap 50 detik agar Neon tidak sleep
+        // Keepalive: kirim query langsung via pgClient agar koneksi LISTEN tidak di-drop Neon
         const keepAliveInterval = setInterval(async () => {
             try {
-                await db.query('SELECT 1');
+                await pgClient.query('SELECT 1');
             } catch (e) {
-                clearInterval(keepAliveInterval);
+                console.error('⚠️ [LISTEN] Keepalive gagal, mencoba melanjutkan...');
             }
         }, 50000);
 
