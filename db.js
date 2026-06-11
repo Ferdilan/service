@@ -10,16 +10,16 @@ const SSL_CONFIG = { rejectUnauthorized: false };
 const primaryPool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: SSL_CONFIG,
-    keepAlive: true,
-    idleTimeoutMillis: 30000,
+    min: 0,                        // Tidak mempertahankan koneksi minimum
+    idleTimeoutMillis: 10000,      // Lepaskan koneksi idle setelah 10 detik
     connectionTimeoutMillis: 10000,
 });
 
 const backupPool = new Pool({
     connectionString: process.env.DATABASE_URL_BACKUP,
     ssl: SSL_CONFIG,
-    keepAlive: true,
-    idleTimeoutMillis: 30000,
+    min: 0,                        // Tidak mempertahankan koneksi minimum
+    idleTimeoutMillis: 10000,      // Lepaskan koneksi idle setelah 10 detik
     connectionTimeoutMillis: 10000,
 });
 
@@ -28,7 +28,7 @@ const backupPool = new Pool({
 // ============================================================
 let usingBackup = false;           // Flag: sedang pakai backup?
 let probeTimer = null;             // Timer untuk coba balik ke primary
-const PROBE_INTERVAL_MS = 10 * 60 * 1000; // Coba balik ke primary setiap 10 menit
+const PROBE_INTERVAL_MS = 30 * 60 * 1000; // Coba balik ke primary setiap 30 menit
 
 // ============================================================
 // DETEKSI ERROR KUOTA / KONEKSI NEON

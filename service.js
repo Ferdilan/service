@@ -64,7 +64,7 @@ const gmapsClient = new Client({});
 let pgClient = null;
 
 // --- EXPONENTIAL BACKOFF & FAILOVER CONFIG ---
-let listenRetryDelay = 5000;          // Mulai dari 5 detik
+let listenRetryDelay = 30000;         // Mulai dari 30 detik (hemat CU saat reconnect berulang)
 const LISTEN_MAX_RETRY_DELAY = 300000; // Maksimum 5 menit
 let listenUsingBackup = false;         // Apakah LISTEN sedang ke backup?
 
@@ -119,23 +119,18 @@ async function listenToDatabaseChanges() {
         await pgClient.connect();
 
         // Reset delay ke awal saat berhasil terhubung
-        listenRetryDelay = 5000;
+        listenRetryDelay = 30000;
         console.log(`✅ [LISTEN-${sourceLabel}] Terhubung. Mendengarkan saluran Postgres...`);
 
         await pgClient.query('LISTEN status_ambulans_channel');
 
-        // Keepalive: kirim query langsung via pgClient agar koneksi LISTEN tidak di-drop Neon
-        const keepAliveInterval = setInterval(async () => {
-            try {
-                await pgClient.query('SELECT 1');
-            } catch (e) {
-                console.error('⚠️ [LISTEN] Keepalive gagal, mencoba melanjutkan...');
-            }
-        }, 50000);
+        // Keepalive DIHAPUS — biarkan Neon scale-to-zero saat idle.
+        // Koneksi LISTEN akan di-drop oleh Neon setelah ~5 menit idle,
+        // lalu otomatis reconnect via scheduleReconnect().
+        // Panggilan ambulans tetap masuk via MQTT (tidak terdampak).
 
         pgClient.on('end', () => {
-            clearInterval(keepAliveInterval);
-            console.warn(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup.`);
+            console.warn(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup (Neon scale-to-zero atau network). Reconnect dijadwalkan...`);
             scheduleReconnect();
         });
 
@@ -156,7 +151,7 @@ async function listenToDatabaseChanges() {
             // Primary tidak tersedia → coba backup
             console.warn(`⏸️ [LISTEN-PRIMARY] Tidak tersedia (${err.message}). Beralih ke BACKUP...`);
             listenUsingBackup = true;
-            listenRetryDelay = 5000; // Reset delay untuk percobaan backup
+            listenRetryDelay = 30000; // Reset delay untuk percobaan backup
             setTimeout(listenToDatabaseChanges, 2000);
         } else if (isUnavailable && listenUsingBackup) {
             console.warn(`⏸️ [LISTEN-BACKUP] Juga tidak tersedia. Retry dalam ${listenRetryDelay / 1000} detik...`);
