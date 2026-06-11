@@ -60,13 +60,12 @@ const client = mqtt.connect(BROKER_URL, {
 
 const gmapsClient = new Client({});
 
-// Koneksi ke Neon DB (LISTEN/NOTIFY)
+// Koneksi ke Neon DB (LISTEN/NOTIFY) — Mode LAZY
+// LISTEN hanya aktif saat ada aktivitas. Tidak auto-reconnect saat Neon scale-to-zero.
 let pgClient = null;
-
-// --- EXPONENTIAL BACKOFF & FAILOVER CONFIG ---
-let listenRetryDelay = 30000;         // Mulai dari 30 detik (hemat CU saat reconnect berulang)
-const LISTEN_MAX_RETRY_DELAY = 300000; // Maksimum 5 menit
+let listenActive = false;              // Apakah LISTEN sedang aktif?
 let listenUsingBackup = false;         // Apakah LISTEN sedang ke backup?
+let listenReconnectTimer = null;       // Timer reconnect (jika ada)
 
 // Kata kunci error yang menandakan kuota/koneksi Neon habis
 function isNeonUnavailableError(err) {
@@ -83,13 +82,19 @@ function isNeonUnavailableError(err) {
     );
 }
 
-function scheduleReconnect() {
-    console.log(`🔄 [LISTEN] Reconnect dijadwalkan dalam ${listenRetryDelay / 1000} detik...`);
-    setTimeout(listenToDatabaseChanges, listenRetryDelay);
-    listenRetryDelay = Math.min(listenRetryDelay * 2, LISTEN_MAX_RETRY_DELAY);
+/**
+ * Memastikan koneksi LISTEN aktif. Dipanggil saat ada aktivitas DB
+ * (misalnya saat MQTT message masuk). Jika sudah aktif, tidak melakukan apa-apa.
+ */
+function ensureListenConnection() {
+    if (listenActive) return; // Sudah aktif, tidak perlu buat baru
+    if (listenReconnectTimer) return; // Sedang dalam proses reconnect
+    listenToDatabaseChanges();
 }
 
 async function listenToDatabaseChanges() {
+    if (listenActive) return; // Guard: hindari koneksi ganda
+
     // Sinkronkan state LISTEN dengan state db.js
     const dbStatus = db.getStatus();
     if (dbStatus.usingBackup && !listenUsingBackup) {
@@ -112,26 +117,26 @@ async function listenToDatabaseChanges() {
 
         pgClient.on('error', (err) => {
             console.error(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN terputus:`, err.message);
+            listenActive = false;
             pgClient.end().catch(() => { });
-            scheduleReconnect();
+            // TIDAK auto-reconnect — biarkan Neon scale-to-zero.
+            // LISTEN akan diaktifkan kembali saat ada aktivitas berikutnya via ensureListenConnection().
+            console.log('💤 [LISTEN] Tidak auto-reconnect. Menunggu aktivitas berikutnya...');
         });
 
         await pgClient.connect();
-
-        // Reset delay ke awal saat berhasil terhubung
-        listenRetryDelay = 30000;
+        listenActive = true;
+        listenReconnectTimer = null;
         console.log(`✅ [LISTEN-${sourceLabel}] Terhubung. Mendengarkan saluran Postgres...`);
 
         await pgClient.query('LISTEN status_ambulans_channel');
 
-        // Keepalive DIHAPUS — biarkan Neon scale-to-zero saat idle.
-        // Koneksi LISTEN akan di-drop oleh Neon setelah ~5 menit idle,
-        // lalu otomatis reconnect via scheduleReconnect().
-        // Panggilan ambulans tetap masuk via MQTT (tidak terdampak).
-
+        // Saat koneksi ditutup (Neon scale-to-zero atau network drop):
+        // TIDAK reconnect otomatis. Biarkan Neon tidur.
         pgClient.on('end', () => {
-            console.warn(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup (Neon scale-to-zero atau network). Reconnect dijadwalkan...`);
-            scheduleReconnect();
+            listenActive = false;
+            console.warn(`💤 [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup (Neon scale-to-zero). Menunggu aktivitas berikutnya...`);
+            // TIDAK memanggil scheduleReconnect() — ini yang mencegah loop!
         });
 
         // Tangkap notifikasi dari Postgres trigger
@@ -145,20 +150,21 @@ async function listenToDatabaseChanges() {
         });
 
     } catch (err) {
+        listenActive = false;
+        listenReconnectTimer = null;
         const isUnavailable = isNeonUnavailableError(err);
 
         if (isUnavailable && !listenUsingBackup) {
-            // Primary tidak tersedia → coba backup
-            console.warn(`⏸️ [LISTEN-PRIMARY] Tidak tersedia (${err.message}). Beralih ke BACKUP...`);
+            // Primary tidak tersedia → coba backup sekali
+            console.warn(`⏸️ [LISTEN-PRIMARY] Tidak tersedia (${err.message}). Mencoba BACKUP...`);
             listenUsingBackup = true;
-            listenRetryDelay = 30000; // Reset delay untuk percobaan backup
-            setTimeout(listenToDatabaseChanges, 2000);
+            listenReconnectTimer = setTimeout(listenToDatabaseChanges, 2000);
         } else if (isUnavailable && listenUsingBackup) {
-            console.warn(`⏸️ [LISTEN-BACKUP] Juga tidak tersedia. Retry dalam ${listenRetryDelay / 1000} detik...`);
-            scheduleReconnect();
+            // Backup juga tidak tersedia → TIDAK retry. Tunggu aktivitas berikutnya.
+            console.warn(`⏸️ [LISTEN-BACKUP] Juga tidak tersedia. Menunggu aktivitas berikutnya...`);
         } else {
             console.error(`❌ [LISTEN-${sourceLabel}] Gagal:`, err.message);
-            scheduleReconnect();
+            // TIDAK retry otomatis — biarkan idle.
         }
     }
 }
@@ -212,8 +218,9 @@ client.on('connect', () => {
 client.on('message', async (topic, message) => {
     try {
         const payload = JSON.parse(message.toString());
-        // console.log(`\n======================================================`);
-        // console.log(`Pesan diterima pada topik [${topic}]: ${payload}`);
+
+        // Pastikan koneksi LISTEN aktif saat ada aktivitas MQTT
+        ensureListenConnection();
 
         // 1. Alur Update Lokasi Driver
         if (topic.startsWith('ambulans/lokasi/update/')) { // T1
