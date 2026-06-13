@@ -98,7 +98,7 @@ async function listenToDatabaseChanges() {
     // Sinkronkan state LISTEN dengan state db.js
     const dbStatus = db.getStatus();
     if (dbStatus.usingBackup && !listenUsingBackup) {
-        console.warn('⚠️  [LISTEN] db.js sudah pakai Backup, LISTEN ikut beralih ke Backup.');
+        console.warn('[LISTEN] db.js sudah pakai Backup, LISTEN ikut beralih ke Backup.');
         listenUsingBackup = true;
     }
 
@@ -116,18 +116,18 @@ async function listenToDatabaseChanges() {
         });
 
         pgClient.on('error', (err) => {
-            console.error(`⚠️ [LISTEN-${sourceLabel}] Koneksi LISTEN terputus:`, err.message);
+            console.error(`[LISTEN-${sourceLabel}] Koneksi LISTEN terputus:`, err.message);
             listenActive = false;
             pgClient.end().catch(() => { });
             // TIDAK auto-reconnect — biarkan Neon scale-to-zero.
             // LISTEN akan diaktifkan kembali saat ada aktivitas berikutnya via ensureListenConnection().
-            console.log('💤 [LISTEN] Tidak auto-reconnect. Menunggu aktivitas berikutnya...');
+            console.log('[LISTEN] Tidak auto-reconnect. Menunggu aktivitas berikutnya...');
         });
 
         await pgClient.connect();
         listenActive = true;
         listenReconnectTimer = null;
-        console.log(`✅ [LISTEN-${sourceLabel}] Terhubung. Mendengarkan saluran Postgres...`);
+        console.log(`[LISTEN-${sourceLabel}] Terhubung. Mendengarkan saluran Postgres...`);
 
         await pgClient.query('LISTEN status_ambulans_channel');
 
@@ -156,14 +156,14 @@ async function listenToDatabaseChanges() {
 
         if (isUnavailable && !listenUsingBackup) {
             // Primary tidak tersedia → coba backup sekali
-            console.warn(`⏸️ [LISTEN-PRIMARY] Tidak tersedia (${err.message}). Mencoba BACKUP...`);
+            console.warn(`[LISTEN-PRIMARY] Tidak tersedia (${err.message}). Mencoba BACKUP...`);
             listenUsingBackup = true;
             listenReconnectTimer = setTimeout(listenToDatabaseChanges, 2000);
         } else if (isUnavailable && listenUsingBackup) {
             // Backup juga tidak tersedia → TIDAK retry. Tunggu aktivitas berikutnya.
-            console.warn(`⏸️ [LISTEN-BACKUP] Juga tidak tersedia. Menunggu aktivitas berikutnya...`);
+            console.warn(`[LISTEN-BACKUP] Juga tidak tersedia. Menunggu aktivitas berikutnya...`);
         } else {
-            console.error(`❌ [LISTEN-${sourceLabel}] Gagal:`, err.message);
+            console.error(`[LISTEN-${sourceLabel}] Gagal:`, err.message);
             // TIDAK retry otomatis — biarkan idle.
         }
     }
@@ -696,7 +696,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     if (validDrivers.length === 0) {
         // Jika semua driver menolak atau tidak ada driver
         await db.query(`UPDATE transaksi_panggilan SET status_panggilan = 'NO_DRIVERS_AVAILABLE' WHERE id_panggilan = $1`, [newCallId]);
-        throw new Error(`Tidak ada driver ${targetCategory} yang tersedia.`);
+        throw new Error(`Tidak ada driver ${targetKategori} yang tersedia.`);
     }
 
     // 2. TAHAP 1: FILTER (Haversine)
