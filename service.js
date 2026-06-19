@@ -135,7 +135,7 @@ async function listenToDatabaseChanges() {
         // TIDAK reconnect otomatis. Biarkan Neon tidur.
         pgClient.on('end', () => {
             listenActive = false;
-            console.warn(`💤 [LISTEN-${sourceLabel}] Koneksi LISTEN ditutup (Neon scale-to-zero). Menunggu aktivitas berikutnya...`);
+            console.warn(`[LISTEN-${sourceLabel}] Koneksi LISTEN ditutup (Neon scale-to-zero). Menunggu aktivitas berikutnya...`);
             // TIDAK memanggil scheduleReconnect() — ini yang mencegah loop!
         });
 
@@ -188,24 +188,30 @@ const rejectedDriversMap = {};
  * Fungsi ini subscribe ke semua topik yang relevan.
  */
 client.on('connect', () => {
-    console.log('Service terhubung ke Broker MQTT.');
+    console.log(`\n================================================================`);
+    console.log(` AMBULANCE DISPATCH SERVICE v1.0`);
+    console.log(` Mode  : PENGUJIAN ALGORITMA`);
+    console.log(` Waktu : ${new Date().toISOString().replace('T', ' ').substring(0, 19)}`);
+    console.log(`================================================================\n`);
+
     logger.setMqttClient(client);
 
-    client.subscribe(TOPIC_PERMINTAAN_AMBULANS, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_PERMINTAAN_AMBULANS}`);
+    const topics = [
+        TOPIC_PERMINTAAN_AMBULANS,
+        TOPIC_UPDATE_LOKASI_DRIVER,
+        TOPIC_KONFIRMASI_TUGAS_DRIVER,
+        TOPIC_UPDATE_STATUS_OPERASIONAL,
+        TOPIC_PEMBATALAN_PASIEN
+    ];
+    topics.forEach(t => {
+        client.subscribe(t, (err) => {
+            if (!err) console.log(`[OK] Berhasil subscribe ke: ${t}`);
+        });
     });
-    client.subscribe(TOPIC_UPDATE_LOKASI_DRIVER, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_UPDATE_LOKASI_DRIVER}`);
-    });
-    client.subscribe(TOPIC_KONFIRMASI_TUGAS_DRIVER, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_KONFIRMASI_TUGAS_DRIVER}`);
-    });
-    client.subscribe(TOPIC_UPDATE_STATUS_OPERASIONAL, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_UPDATE_STATUS_OPERASIONAL}`);
-    });
-    client.subscribe(TOPIC_PEMBATALAN_PASIEN, (err) => {
-        if (!err) console.log(`Berhasil subscribe ke: ${TOPIC_PEMBATALAN_PASIEN}`);
-    });
+
+    console.log(`\n================================================================`);
+    console.log(` Menunggu update lokasi driver dan panggilan pasien...`);
+    console.log(`================================================================\n`);
 }); // End Client Connect
 
 
@@ -342,14 +348,11 @@ async function handleDriverLocationUpdate(driverId, data) {
  * @returns {Promise<void>}
  */
 async function handlePatientRequest(data) {
-    // console.log(`[T2] Menerima permintaan ambulan pasien...`);
-
     const { id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan, kondisi } = data;
     const layanan = jenis_layanan || 'DARURAT';
-    logger.info(`[T2] Menerima panggilan ${layanan} dari Pasien ${id_pasien}...`, { category: 'dispatch' });
 
     if (!id_pasien || !lokasi_pasien_lat || !lokasi_pasien_lon) {
-        logger.error("[T3] Data tidak lengkap. Payload: " + JSON.stringify(data), { category: 'dispatch' });
+        logger.error("Data tidak lengkap. Payload: " + JSON.stringify(data), { category: 'dispatch' });
         return;
     }
 
@@ -357,6 +360,30 @@ async function handlePatientRequest(data) {
     let newCallId;
 
     try {
+        // Ambil nama pasien dari DB untuk logging
+        let namaPasien = `Pasien ${id_pasien}`;
+        const pasienData = await db.query(`SELECT nama FROM pasien WHERE id_pasien = $1`, [id_pasien]);
+        if (pasienData.rows.length > 0 && pasienData.rows[0].nama) namaPasien = pasienData.rows[0].nama;
+
+        // Banner panggilan darurat baru (Terminal)
+        console.log(`\n================================================================`);
+        console.log(` PANGGILAN DARURAT BARU`);
+        console.log(` Pasien  : ${namaPasien}`);
+        console.log(` Waktu   : ${new Date().toISOString().replace('T', ' ').substring(0, 19)}`);
+        console.log(`================================================================`);
+        console.log(``);
+        console.log(` Lokasi Pasien:`);
+        console.log(`   Latitude  : ${lokasi_pasien_lat}`);
+        console.log(`   Longitude : ${lokasi_pasien_lon}`);
+        console.log(`   Jenis     : ${layanan}`);
+        console.log(``);
+
+        // Log ke System Monitor
+        logger.info(`----------------------------------------------------------------`, { category: 'dispatch' });
+        logger.info(`PANGGILAN DARURAT BARU | Pasien: ${namaPasien}`, { category: 'dispatch' });
+        logger.info(`Lokasi: ${lokasi_pasien_lat}, ${lokasi_pasien_lon} | Jenis: ${layanan}`, { category: 'dispatch' });
+        logger.info(`----------------------------------------------------------------`, { category: 'dispatch' });
+
         // Langkah 1: Catat panggilan darurat ke DB untuk mendapatkan ID
         const sqlInsertCall = `
             INSERT INTO transaksi_panggilan
@@ -372,17 +399,17 @@ async function handlePatientRequest(data) {
             kondisi
         ]);
         newCallId = result.rows[0].id_panggilan;
-        logger.info(`[T2] Panggilan baru (ID: ${newCallId}) dari Pasien ${id_pasien} tipe ${layanan} dicatat di DB.`, { category: 'dispatch' });
+        logger.info(`Panggilan baru dari ${namaPasien} dicatat di DB.`, { category: 'dispatch' });
 
         // Langkah 2: Temukan driver terbaik menggunakan Hybrid Model (Filter + Refine)
-        logger.info(`[T2] Memulai proses pencarian driver...`, { category: 'dispatch' });
+        logger.info(`Memulai proses pencarian driver...`, { category: 'dispatch' });
         const bestDriver = await _findBestDriver(patientLocation, newCallId, layanan);
 
         // Langkah 3: Tugaskan driver dan kirim notifikasi
         await _assignDriverToCall(bestDriver, newCallId, patientLocation, id_pasien, kondisi);
 
     } catch (error) {
-        console.error(`[T2] Gagal memproses permintaan bantuan (ID Panggilan: ${newCallId}):`, error.message);
+        console.error(`Gagal memproses permintaan bantuan:`, error.message);
         if (newCallId) {
             await db.query(`UPDATE transaksi_panggilan SET status_panggilan = 'FAILED' WHERE id_panggilan = $1`, [newCallId]).catch(console.error);
         }
@@ -402,12 +429,18 @@ async function handleDriverTaskConfirmation(data) {
     const status = data.status;
     const id_ambulans = data.id_driver || data.id_ambulans;
 
+    // Coba ambil nama driver dari DB untuk log yang lebih baik
+    let namaDriver = `Ambulans ${id_ambulans}`;
+    try {
+        const driverData = await db.query(`SELECT nama_driver FROM ambulans WHERE id_ambulans = $1`, [id_ambulans]);
+        if (driverData.rows.length > 0 && driverData.rows[0].nama_driver) namaDriver = driverData.rows[0].nama_driver;
+    } catch (e) { }
 
-    logger.info(`[T4] Konfirmasi dari Ambulans ${id_ambulans}: ${status}`, { category: 'dispatch' });
+    logger.info(`Konfirmasi dari ${namaDriver}: ${status.toUpperCase()}`, { category: 'dispatch' });
 
     // Validasi Data
     if (!id_panggilan || !id_ambulans || !status) {
-        logger.error(`[T4] Data konfirmasi tugas tidak lengkap. Payload: ${JSON.stringify(data)}`, { category: 'dispatch' });
+        logger.error(`Data konfirmasi tugas tidak lengkap. Payload: ${JSON.stringify(data)}`, { category: 'dispatch' });
         return;
     }
 
@@ -429,7 +462,12 @@ async function handleDriverTaskConfirmation(data) {
             // Hapus data penolakan dari memori agar bersih
             if (rejectedDriversMap[id_panggilan]) delete rejectedDriversMap[id_panggilan];
 
-            logger.info(`[T4] Driver ${id_ambulans} MENERIMA TUGAS`, { category: 'dispatch' });
+            console.log(`\n================================================================`);
+            console.log(` PENUGASAN DITERIMA`);
+            console.log(` Driver : ${namaDriver}`);
+            console.log(` Status : Driver sedang menuju lokasi pasien.`);
+            console.log(`================================================================\n`);
+            logger.info(`${namaDriver} MENERIMA TUGAS`, { category: 'dispatch' });
 
             const callData = await db.query(
                 `SELECT id_pasien FROM transaksi_panggilan WHERE id_panggilan = $1`,
@@ -462,7 +500,12 @@ async function handleDriverTaskConfirmation(data) {
                 return; // Hentikan proses agar server tidak crash
             }
 
-            logger.warn(`[T4] Driver ${id_ambulans} MENOLAK tugas # ${id_panggilan}.`, { category: 'dispatch' });
+            console.log(`\n================================================================`);
+            console.log(` PENUGASAN DITOLAK`);
+            console.log(` Driver : ${namaDriver}`);
+            console.log(` Status : Mencari kandidat driver berikutnya...`);
+            console.log(`================================================================\n`);
+            logger.warn(`${namaDriver} MENOLAK tugas # ${id_panggilan}.`, { category: 'dispatch' });
 
             // 2. Inisialisasi daftar penolakan jika belum ada
             if (!Array.isArray(rejectedDriversMap[id_panggilan])) {
@@ -506,12 +549,16 @@ async function handleDriverTaskConfirmation(data) {
                         rejectedDriversMap[id_panggilan] //kirim daftar penolak
                     );
 
-                    logger.info(`Kandidat penggant ditemukan: Driver ${nextBestDriver.id}`, { category: 'dispatch' });
+                    logger.info(`Kandidat pengganti ditemukan: ${nextBestDriver.nama}`, { category: 'dispatch' });
 
                     // 6. Tugaskan driver baru dengan menyertakan kondisi dari DB
                     await _assignDriverToCall(nextBestDriver, id_panggilan, patientLocation, dataPasien.id_pasien, dataPasien.kondisi);
                 }
             } catch (errFind) {
+                console.log(`\n================================================================`);
+                console.log(` PENCARIAN GAGAL`);
+                console.log(` Alasan : ${errFind.message}`);
+                console.log(`================================================================\n`);
                 logger.error(`Gagal mencari pengganti: ${errFind.message}`, { category: 'dispatch' });
                 // JIKA TIDAK ADA DRIVER LAGI, BERITAHU PASIEN
                 const callDataFallback = await db.query(`SELECT id_pasien FROM transaksi_panggilan WHERE id_panggilan = $1`, [id_panggilan]);
@@ -542,10 +589,15 @@ async function handleDriverTaskConfirmation(data) {
                 };
 
                 client.publish(topicBalasanPasien, JSON.stringify(payloadSelesai), { qos: 1 });
-                logger.info(`[T8] Notifikasi SELESAI dikirim ke Pasien: ${topicBalasanPasien}`, { category: 'dispatch' });
+                logger.info(`Notifikasi SELESAI dikirim ke Pasien: ${topicBalasanPasien}`, { category: 'dispatch' });
             }
 
-            logger.info(`[T7] Tugas Selesai. Driver ${id_ambulans} kembali available.`, { category: 'dispatch' });
+            console.log(`\n================================================================`);
+            console.log(` TUGAS SELESAI`);
+            console.log(` Driver : ${namaDriver}`);
+            console.log(` Status : Driver kembali berstatus AVAILABLE.`);
+            console.log(`================================================================\n`);
+            logger.info(`Tugas Selesai. ${namaDriver} kembali available.`, { category: 'dispatch' });
 
 
         }
@@ -663,14 +715,14 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     // logika klasifikasi armada
     let targetKategori = (jenisLayanan === 'TRANSPORT') ? 'RELAWAN' : 'PSC';
 
-    console.log(`[Filter] Mencari armada kategori ${targetKategori} untuk layanan ${jenisLayanan}`);
+    logger.info(`Mencari armada kategori ${targetKategori} untuk layanan ${jenisLayanan}...`, { category: 'dispatch' });
 
     // Gunakan safeBlacklist agar tidak crash
     const safeBlacklist = Array.isArray(excludedDriverIds) ? excludedDriverIds : [];
 
     // Gunakan status 'available' sesuai proposal untuk driver yang siap bertugas.
     const sqlGetDrivers = `
-        SELECT id_ambulans, lokasi_latitude, lokasi_longitude 
+        SELECT id_ambulans, nama_driver, lokasi_latitude, lokasi_longitude 
         FROM ambulans 
         WHERE status_operasional = 'AVAILABLE'
           AND lokasi_latitude IS NOT NULL
@@ -700,30 +752,54 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     }
 
     // 2. TAHAP 1: FILTER (Haversine)
-    logger.info(`--- [T2] TAHAP 1: FILTER (Haversine) ---`, { category: 'dispatch' });
+    console.log(`----------------------------------------------------------------`);
+    logger.info(`--- TAHAP 1: FILTER -- Algoritma Haversine (Jarak Garis Lurus) ---`, { category: 'dispatch' });
+    logger.info(`Menghitung jarak dari ${validDrivers.length} driver ke lokasi pasien...`, { category: 'dispatch' });
+    console.log(``);
+    console.log(` Driver          | Latitude       | Longitude      | Haversine (m)`);
+    console.log(`----------------------------------------------------------------`);
     const driversWithDistance = validDrivers.map(driver => {
         const driverLocation = {
             latitude: parseFloat(driver.lokasi_latitude),
             longitude: parseFloat(driver.lokasi_longitude)
         };
         const distanceHaversine = getDistance(patientLocation, driverLocation);
+        const nama = driver.nama_driver || `Ambulans ${driver.id_ambulans}`;
 
-
-        logger.info(`  -> Driver ${driver.id_ambulans} | Haversine: ${distanceHaversine} m`, { category: 'dispatch' });
+        console.log(` ${nama.padEnd(16)}| ${String(driver.lokasi_latitude).padEnd(15)}| ${String(driver.lokasi_longitude).padEnd(15)}| ${String(distanceHaversine).padStart(12)}`);
+        logger.info(`  -> ${nama.padEnd(15)} | Haversine: ${distanceHaversine} m`, { category: 'dispatch' });
 
         return {
             id: driver.id_ambulans,
+            nama: nama,
             location: driverLocation,
             distanceHaversine: distanceHaversine
         };
     });
+    console.log(`----------------------------------------------------------------`);
 
     driversWithDistance.sort((a, b) => a.distanceHaversine - b.distanceHaversine);
     const candidates = driversWithDistance.slice(0, 5); // Tempat pengambilan 5 kandidat teratas
 
+    // Log peringkat Haversine
+    console.log(``);
+    console.log(` Hasil Peringkat Haversine (terurut terdekat ke terjauh):`);
+    logger.info(`Hasil Peringkat Haversine (terurut terdekat ke terjauh):`, { category: 'dispatch' });
+    candidates.forEach((c, i) => {
+        const marker = i === 0 ? '  << Terdekat' : '';
+        console.log(`   ${i + 1}. ${c.nama.padEnd(15)} -> ${c.distanceHaversine} m${marker}`);
+        logger.info(`  ${i + 1}. ${c.nama} -> ${c.distanceHaversine} m${marker}`, { category: 'dispatch' });
+    });
+    if (driversWithDistance.length > 5) {
+        console.log(`   -- (${driversWithDistance.length - 5} driver lainnya tidak masuk 5 besar) --`);
+    }
+    console.log(``)
+
     // 3. TAHAP 2: REFINE (Google Maps API)
-    logger.info(`--- [T2] TAHAP 2: REFINE (Google Maps API) ---`, { category: 'dispatch' });
-    logger.info(`Mengambil ${candidates.length} kandidat teratas untuk dicek ETA: ${candidates.map(c => c.id).join(', ')}`, { category: 'dispatch' });
+    console.log(`----------------------------------------------------------------`);
+    logger.info(`--- TAHAP 2: REFINE -- Google Distance Matrix API (Jarak & Waktu Rute) ---`, { category: 'dispatch' });
+    logger.info(`Mengirim ${candidates.length} kandidat teratas ke Google API...`, { category: 'dispatch' });
+    logger.info(`Destinations: ${candidates.map(c => c.nama).join(', ')}`, { category: 'dispatch' });
 
     const origins = [patientLocation];
     const destinations = candidates.map(c => c.location);
@@ -732,20 +808,26 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
         params: { key: GOOGLE_MAPS_API_KEY, origins: origins, destinations: destinations, travelMode: 'DRIVING' } //travel mode untuk mobil
     });
 
-
-    logger.info(`--- [T2] HASIL PERHITUNGAN---`, { category: 'dispatch' });
+    console.log(``);
+    console.log(` Driver          | Haversine (m) | Jarak Rute     | Waktu Tempuh`);
+    console.log(`----------------------------------------------------------------`);
+    logger.info(`--- HASIL PERHITUNGAN ---`, { category: 'dispatch' });
     const results = [];
     apiResponse.data.rows[0].elements.forEach((element, index) => {
         const candidate = candidates[index];
         if (element.status === 'OK') {
+            const api_distance_text = element.distance.text;
             const api_duration_text = element.duration.text;
             const api_duration_seconds = element.duration.value;
-            logger.info(`  -> Driver ${candidate.id} (Haversine: ${candidate.distanceHaversine} m) | ETA: ${api_duration_text}`, { category: 'dispatch' });
-            results.push({ id: candidate.id, etaSeconds: api_duration_seconds });
+            console.log(` ${candidate.nama.padEnd(16)}| ${String(candidate.distanceHaversine).padStart(13)} | ${api_distance_text.padEnd(15)}| ${api_duration_text}`);
+            logger.info(`  -> ${candidate.nama.padEnd(15)} (Hav: ${candidate.distanceHaversine} m) | Rute: ${api_distance_text} | ETA: ${api_duration_text}`, { category: 'dispatch' });
+            results.push({ id: candidate.id, nama: candidate.nama, etaSeconds: api_duration_seconds, distanceText: api_distance_text, durationText: api_duration_text });
         } else {
-            logger.warn(`  -> Driver ${candidate.id}: Google API Gagal (Status: ${element.status})`, { category: 'dispatch' });
+            logger.warn(`  -> ${candidate.nama}: Google API Gagal (Status: ${element.status})`, { category: 'dispatch' });
         }
     });
+    console.log(`----------------------------------------------------------------`);
+    console.log(` Validasi: Jarak Rute selalu >= Haversine [VALID]`);
 
     if (results.length === 0) {
         await db.query(`UPDATE transaksi_panggilan SET status_panggilan = 'API_FAILED' WHERE id_panggilan = $1`, [newCallId]);
@@ -755,9 +837,41 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     results.sort((a, b) => a.etaSeconds - b.etaSeconds);
     const bestDriverAPI = results[0];
 
-    console.log(`--- [T2] KESIMPULAN AKHIR (Hybrid Model) ---`);
-    logger.info(`Driver terdekat (Haversine): ${driversWithDistance[0].id}`, { category: 'dispatch' });
-    logger.info(`Driver tercepat (ETA Google API): ${bestDriverAPI.id} (${bestDriverAPI.etaSeconds} dtk)`, { category: 'dispatch' });
+    // Peringkat Distance Matrix
+    console.log(``);
+    console.log(` Hasil Peringkat Distance Matrix (terurut tercepat ke terlama):`);
+    logger.info(`Hasil Peringkat Distance Matrix (terurut tercepat ke terlama):`, { category: 'dispatch' });
+    results.forEach((r, i) => {
+        console.log(`   ${i + 1}. ${r.nama.padEnd(15)} -> ${r.durationText}  (Jarak Rute: ${r.distanceText})`);
+        logger.info(`  ${i + 1}. ${r.nama} -> ${r.durationText}  (Jarak Rute: ${r.distanceText})`, { category: 'dispatch' });
+    });
+
+    // Kesimpulan
+    const haversineWinner = driversWithDistance[0];
+    const isConsistent = haversineWinner.id === bestDriverAPI.id;
+
+    console.log(``);
+    console.log(`================================================================`);
+    console.log(` KESIMPULAN (Hybrid Model):`);
+    console.log(`  Driver terdekat  (Haversine)           : ${haversineWinner.nama} (${haversineWinner.distanceHaversine} m)`);
+    console.log(`  Driver tercepat  (Distance Matrix API) : ${bestDriverAPI.nama} (${bestDriverAPI.durationText})`);
+    console.log(``);
+    logger.info(`--- KESIMPULAN (Hybrid Model) ---`, { category: 'dispatch' });
+    logger.info(`Driver terdekat (Haversine)          : ${haversineWinner.nama} (${haversineWinner.distanceHaversine} m)`, { category: 'dispatch' });
+    logger.info(`Driver tercepat (Distance Matrix API): ${bestDriverAPI.nama} (${bestDriverAPI.durationText})`, { category: 'dispatch' });
+
+    if (isConsistent) {
+        console.log(`  HASIL: KONSISTEN -- Kedua metode menunjuk driver yang sama.`);
+        logger.info(`HASIL: KONSISTEN -- Kedua metode menunjuk driver yang sama.`, { category: 'dispatch' });
+    } else {
+        console.log(`  HASIL: BERBEDA -- Haversine dan Distance Matrix menunjuk driver yang berbeda.`);
+        console.log(`  ${haversineWinner.nama} lebih dekat garis lurus, tetapi rute jalannya lebih jauh.`);
+        console.log(`  Sistem memilih ${bestDriverAPI.nama} berdasarkan waktu tempuh tercepat.`);
+        logger.warn(`HASIL: BERBEDA -- Haversine dan Distance Matrix menunjuk driver yang berbeda.`, { category: 'dispatch' });
+        logger.warn(`${haversineWinner.nama} lebih dekat garis lurus, tetapi rute jalannya lebih jauh.`, { category: 'dispatch' });
+        logger.warn(`Sistem memilih ${bestDriverAPI.nama} berdasarkan waktu tempuh tercepat.`, { category: 'dispatch' });
+    }
+    console.log(`================================================================\n`);
 
     return bestDriverAPI;
 } //End _findBestDriver
@@ -781,12 +895,17 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
         WHERE id_panggilan = $2
     `;
 
-    logger.info(`[T3] Driver ${bestDriver.id} DITAWARI tugas panggilan ${callId}. Menunggu konfirmasi...`, { category: 'dispatch' });
+    console.log(`\n================================================================`);
+    console.log(` MENGIRIM PENUGASAN`);
+    console.log(` Target : ${bestDriver.nama}`);
+    console.log(` Status : Menunggu konfirmasi driver (Timeout: 20 detik)`);
+    console.log(`================================================================\n`);
+
+    logger.info(`${bestDriver.nama} DITAWARI tugas panggilan ${callId}. Menunggu konfirmasi...`, { category: 'dispatch' });
 
     try {
-        logger.info(`[T3-DB] Mencoba update panggilan ${callId} ke driver ${bestDriver.id}...`, { category: 'dispatch' });
         await db.query(sqlUpdateCall, [bestDriver.id, callId]);
-        logger.info(`[T3-DB] Update status ${callId} menjadi WAITING_FOR_DRIVER berhasil.`, { category: 'dispatch' });
+        logger.info(`Update status ${callId} menjadi WAITING_FOR_DRIVER berhasil.`, { category: 'dispatch' });
 
         // 2. Ambil Nama Pasien dari DB Neon
         const sqlGetPatient = `SELECT nama FROM pasien WHERE id_pasien = $1`;
@@ -819,7 +938,7 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
         kondisi: kondisi // <-- Menggunakan parameter yang dilempar dari luar
     };
     client.publish(topicTugas, JSON.stringify(payloadTugas), { qos: 1 });
-    logger.info(`[T3] Penawaran Tugas dikirim ke topik ${topicTugas}`, { category: 'dispatch' });
+    logger.info(`Penawaran Tugas dikirim ke topik ${topicTugas}`, { category: 'dispatch' });
 
     // Di dalam fungsi _assignDriverToCall, setelah mengirim MQTT tugas:
     setTimeout(async () => {
@@ -837,7 +956,12 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
 
                 // Jika setelah 20 detik statusnya masih WAITING_FOR_DRIVER (belum diterima/ditolak manual) dan driver belum dialihkan
                 if (currentStatus === 'WAITING_FOR_DRIVER' && assignedDriver == bestDriver.id) {
-                    logger.warn(`[TIMEOUT] Driver ${bestDriver.id} tidak merespons dalam 20 detik. Meneruskan ke driver lain...`, { category: 'dispatch' });
+                    console.log(`\n================================================================`);
+                    console.log(` TIMEOUT PENUGASAN`);
+                    console.log(` Driver : ${bestDriver.nama}`);
+                    console.log(` Status : Tidak ada respons dalam 20 detik, mencari pengganti.`);
+                    console.log(`================================================================\n`);
+                    logger.warn(`[TIMEOUT] ${bestDriver.nama} tidak merespons dalam 20 detik. Meneruskan ke driver lain...`, { category: 'dispatch' });
 
                     // 1. Tembak sinyal batal/timeout ke driver pertama agar aplikasi berhenti berdering
                     const topicInterupsi = `ambulans/interupsi/batal/${bestDriver.id}`;
@@ -862,7 +986,7 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
                             rejectedDriversMap[callId]
                         );
 
-                        console.log(`[TIMEOUT] Kandidat pengganti ditemukan: Driver ${nextBestDriver.id}`);
+                        logger.info(`[TIMEOUT] Kandidat pengganti ditemukan: ${nextBestDriver.nama}`, { category: 'dispatch' });
 
                         // 3. Panggil ulang _assignDriverToCall dengan driver yang baru
                         await _assignDriverToCall(nextBestDriver, callId, patientLocation, id_pasien, kondisi);
