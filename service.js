@@ -778,7 +778,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     });
     console.log(`----------------------------------------------------------------`);
 
-    driversWithDistance.sort((a, b) => a.distanceHaversine - b.distanceHaversine);
+    driversWithDistance.sort((a, b) => a.distanceHaversine - b.distanceHaversine); // Mengurutkan berdasarkan jarak haversine terdekat
     const candidates = driversWithDistance.slice(0, 5); // Tempat pengambilan 5 kandidat teratas
 
     // Log peringkat Haversine
@@ -821,7 +821,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
             const api_duration_seconds = element.duration.value;
             console.log(` ${candidate.nama.padEnd(16)}| ${String(candidate.distanceHaversine).padStart(13)} | ${api_distance_text.padEnd(15)}| ${api_duration_text}`);
             logger.info(`  -> ${candidate.nama.padEnd(15)} (Hav: ${candidate.distanceHaversine} m) | Rute: ${api_distance_text} | ETA: ${api_duration_text}`, { category: 'dispatch' });
-            results.push({ id: candidate.id, nama: candidate.nama, etaSeconds: api_duration_seconds, distanceText: api_distance_text, durationText: api_duration_text });
+            results.push({ id: candidate.id, nama: candidate.nama, etaSeconds: api_duration_seconds, distanceMeters: element.distance.value, distanceText: api_distance_text, durationText: api_duration_text });
         } else {
             logger.warn(`  -> ${candidate.nama}: Google API Gagal (Status: ${element.status})`, { category: 'dispatch' });
         }
@@ -834,7 +834,7 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
         throw new Error("Gagal mendapatkan hasil ETA dari Google.");
     }
 
-    results.sort((a, b) => a.etaSeconds - b.etaSeconds);
+    results.sort((a, b) => a.etaSeconds - b.etaSeconds || a.distanceMeters - b.distanceMeters);
     const bestDriverAPI = results[0];
 
     // Peringkat Distance Matrix
