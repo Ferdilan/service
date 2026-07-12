@@ -2,10 +2,10 @@
   "name": "ambulance-service",
   "version": "1.0.0",
   "description": "MQTT-based ambulance dispatch engine service",
-  "main": "service.js",
+  "main": "servicesec.js",
   "scripts": {
-    "start": "node service.js",
-    "dev": "nodemon service.js"
+    "start": "node servicesec.js",
+    "dev": "nodemon servicesec.js"
   },
   "keywords": [],
   "author": "",
