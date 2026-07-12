@@ -1002,24 +1002,4 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
             console.error("Gagal melakukan pengecekan timeout:", err);
         }
     }, 20000); // 20000 ms = 20 detik
-
-
-
-
-    // // 4. Kirim T5: Notifikasi status ke pasien
-    // const topicBalasan = `panggilan/status/${callId}`;
-    // const topicBalasanPasien = `panggilan/status/pasien/${id_pasien}`; //Perlu diperhatikan bahwa tidak terdapat topik ini
-    // const payloadBalasan = {
-    //     // status_panggilan: "menuju_lokasi",
-    //     status_panggilan: "menunggu_konfirmasi_driver",
-    //     id_panggilan: callId,
-    //     id_ambulans: bestDriver.id,
-    //     eta_detik: bestDriver.etaSeconds
-    // };
-    // const payloadString = JSON.stringify(payloadBalasan);
-    // client.publish(topicBalasan, payloadString, { qos: 1 });
-    // // client.publish(topicBalasanPasien, payloadString, { qos: 1 });
-    // console.log(`[T5] Balasan dikirim ke ${topicBalasan} dan ${topicBalasanPasien}`);
 } //End _assignDriverToCall
-
-

@@ -1,0 +1,6 @@
+﻿Tahap,Jumlah Dikirim,Masuk DB,Terproses,Driver Ditugaskan,No Drivers,API Failed,Gagal,Pending,Tingkat Pemrosesan (%),Waktu Publish (ms),Respons Min (ms),Respons Max (ms),Respons Avg (ms)
+1,10,10,10,20,0,0,0,0,100.0,77,5988,27281,16559
+2,25,25,25,50,0,0,0,0,100.0,142,11489,34143,23016
+3,50,50,50,75,0,0,0,0,100.0,147,58,220652,71477
+4,75,75,75,50,0,0,0,0,100.0,216,7987,9953,9304
+5,100,100,100,75,0,0,0,0,100.0,285,13442,16391,15684

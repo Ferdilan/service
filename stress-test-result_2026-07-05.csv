@@ -1,0 +1,6 @@
+﻿Tahap,Jumlah Dikirim,Waktu Publish (ms),Respons Min (ms),Respons Max (ms),Respons Avg (ms)
+1,10,80,4171,26903,15708
+2,25,150,13574,34734,24289
+3,50,556,17815,30068,27980
+4,75,303,-,-,-
+5,100,494,11057,14564,13562
