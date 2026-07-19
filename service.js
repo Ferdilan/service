@@ -177,6 +177,7 @@ const TOPIC_UPDATE_LOKASI_DRIVER = 'ambulans/lokasi/update/+';          // T1
 const TOPIC_KONFIRMASI_TUGAS_DRIVER = 'ambulans/respons/konfirmasi';    // T4
 const TOPIC_UPDATE_STATUS_OPERASIONAL = 'ambulans/status/update';       // Topik Tambahan
 const TOPIC_PEMBATALAN_PASIEN = 'panggilan/batal/pasien';               // Topik Pembatalan
+const TOPIC_PEMBATALAN_DRIVER = 'panggilan/batal/driver';               // Topik Pembatalan Driver
 
 // Menyimpan daftar driver yang menolak panggilan
 const rejectedDriversMap = {};
@@ -201,7 +202,8 @@ client.on('connect', () => {
         TOPIC_UPDATE_LOKASI_DRIVER,
         TOPIC_KONFIRMASI_TUGAS_DRIVER,
         TOPIC_UPDATE_STATUS_OPERASIONAL,
-        TOPIC_PEMBATALAN_PASIEN
+        TOPIC_PEMBATALAN_PASIEN,
+        TOPIC_PEMBATALAN_DRIVER
     ];
     topics.forEach(t => {
         client.subscribe(t, (err) => {
@@ -280,6 +282,14 @@ client.on('message', async (topic, message) => {
                 return;
             }
             await handlePatientCancellation(value);
+        }
+        else if (topic === TOPIC_PEMBATALAN_DRIVER) {
+            const { error, value } = schemaBatal.validate(payload);
+            if (error) {
+                console.error(`[VALIDASI] Payload Pembatalan Driver Error:`, error.message);
+                return;
+            }
+            await handleDriverCancellation(value);
         }
     }
     catch (e) {
@@ -696,6 +706,58 @@ async function handlePatientCancellation(data) {
     }
 }
 
+/**
+ * Menangani pembatalan panggilan yang dikirim oleh driver (misal: kendala kendaraan).
+ */
+async function handleDriverCancellation(data) {
+    try {
+        logger.info(`[PEMBATALAN DRIVER] Menerima pembatalan dari driver untuk panggilan ${data.id_panggilan}`, { category: 'dispatch' });
+
+        if (!data.id_panggilan) {
+            logger.error(`[PEMBATALAN DRIVER] Data pembatalan tidak lengkap (id_panggilan kosong)`, { category: 'dispatch' });
+            return;
+        }
+
+        const validId = parseInt(data.id_panggilan);
+
+        // Update transaksi menjadi CANCELLED dan ambil info untuk notifikasi
+        const result = await db.query(`
+            UPDATE transaksi_panggilan 
+            SET status_panggilan = 'CANCELLED' 
+            WHERE id_panggilan = $1
+            RETURNING id_pasien, id_ambulans_respons`, [validId]);
+
+        if (result.rows.length > 0) {
+            const row = result.rows[0];
+
+            // 1. Ubah status driver menjadi OFFLINE karena terdapat kendala kendaraan
+            const driverId = row.id_ambulans_respons || data.id_ambulans;
+            if (driverId) {
+                await db.query(
+                    "UPDATE ambulans SET status_operasional = 'OFFLINE' WHERE id_ambulans = $1",
+                    [driverId]
+                );
+                logger.info(`[PEMBATALAN DRIVER] Status driver ${driverId} diubah menjadi OFFLINE akibat kendala kendaraan.`, { category: 'dispatch' });
+            }
+
+            // 2. Beri notifikasi pembatalan ke pasien
+            if (row.id_pasien) {
+                const topicBalasanPasien = `panggilan/status/pasien/${row.id_pasien}`;
+                client.publish(topicBalasanPasien, JSON.stringify({
+                    id_panggilan: validId,
+                    status: 'BATAL_OLEH_DRIVER',
+                    pesan: "Driver membatalkan pesanan karena kendala operasional kendaraan. Silakan lakukan pesanan ulang."
+                }), { qos: 1 });
+                logger.info(`[PEMBATALAN DRIVER] Sinyal batal berhasil dikirim ke pasien ${row.id_pasien}`, { category: 'dispatch' });
+            }
+        } else {
+             logger.error(`[PEMBATALAN DRIVER] Panggilan ${validId} tidak ditemukan atau sudah batal.`, { category: 'dispatch' });
+        }
+    } catch (error) {
+        logger.error(`[PEMBATALAN DRIVER] Gagal memproses pembatalan: ${error.message}`, { category: 'dispatch' });
+    }
+}
+
 
 /**
  * =======================================================
@@ -713,7 +775,12 @@ async function handlePatientCancellation(data) {
 async function _findBestDriver(patientLocation, newCallId, jenisLayanan, excludedDriverIds = []) {
 
     // logika klasifikasi armada
-    let targetKategori = (jenisLayanan === 'TRANSPORT') ? 'RELAWAN' : 'PSC';
+    let targetKategori = 'PSC';
+    if (jenisLayanan === 'JENAZAH') {
+        targetKategori = 'JENAZAH';
+    } else if (jenisLayanan === 'TRANSPORT') {
+        targetKategori = 'RELAWAN';
+    }
 
     logger.info(`Mencari armada kategori ${targetKategori} untuk layanan ${jenisLayanan}...`, { category: 'dispatch' });
 
