@@ -539,10 +539,10 @@ async function handleDriverTaskConfirmation(data) {
                     [id_panggilan]
                 );
 
-                if (callData.length > 0) {
-                    const row = callData[0];
+                if (callData.rows.length > 0) {
+                    const row = callData.rows[0];
 
-                    const dataPasien = callData[0];
+                    const dataPasien = callData.rows[0];
                     const patientLocation = {
                         latitude: parseFloat(row.lokasi_pasien_lat),
                         longitude: parseFloat(row.lokasi_pasien_lon)
