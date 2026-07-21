@@ -26,7 +26,7 @@ const schemaT2 = Joi.object({
 
 const schemaT4 = Joi.object({
     id_panggilan: Joi.number().integer().required(),
-    status: Joi.string().valid('diterima', 'ditolak', 'selesai').required(),
+    status: Joi.string().valid('diterima', 'ditolak', 'selesai', 'kendala').required(),
     id_ambulans: Joi.number().integer().optional(),
     id_driver: Joi.number().integer().optional()
 }).or('id_ambulans', 'id_driver').unknown(true);

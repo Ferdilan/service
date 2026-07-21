@@ -24,7 +24,7 @@ const schemaT2 = Joi.object({
 
 const schemaT4 = Joi.object({
     id_panggilan: Joi.number().integer().required(),
-    status: Joi.string().valid('diterima', 'ditolak', 'selesai').required(),
+    status: Joi.string().valid('diterima', 'ditolak', 'selesai', 'kendala').required(),
     id_ambulans: Joi.number().integer().optional(),
     id_driver: Joi.number().integer().optional()
 }).or('id_ambulans', 'id_driver').unknown(true);
@@ -501,21 +501,23 @@ async function handleDriverTaskConfirmation(data) {
             }
         }
 
-        // Skenario B: Ditolak (re-dispathcing)
-        else if (status === 'ditolak') {
+        // Skenario B: Ditolak atau Kendala (re-dispatching)
+        else if (status === 'ditolak' || status === 'kendala') {
 
             // 1. Validasi Kritis: Tanpa id_panggilan, kita tidak bisa mencari di DB
             if (!id_panggilan) {
-                logger.error("Eror Fatal: Driver menolak, tapi 'id_panggilan' tidak dikirim oleh Android!", { category: 'dispatch' });
+                logger.error(`Eror Fatal: Driver mengirim status '${status}', tapi 'id_panggilan' tidak dikirim oleh Android!`, { category: 'dispatch' });
                 return; // Hentikan proses agar server tidak crash
             }
 
+            const actionName = status === 'kendala' ? 'MENGALAMI KENDALA PADA' : 'MENOLAK';
+
             console.log(`\n================================================================`);
-            console.log(` PENUGASAN DITOLAK`);
+            console.log(` PENUGASAN ${status === 'kendala' ? 'TERKENDALA' : 'DITOLAK'}`);
             console.log(` Driver : ${namaDriver}`);
             console.log(` Status : Mencari kandidat driver berikutnya...`);
             console.log(`================================================================\n`);
-            logger.warn(`${namaDriver} MENOLAK tugas # ${id_panggilan}.`, { category: 'dispatch' });
+            logger.warn(`${namaDriver} ${actionName} tugas # ${id_panggilan}.`, { category: 'dispatch' });
 
             // 2. Inisialisasi daftar penolakan jika belum ada
             if (!Array.isArray(rejectedDriversMap[id_panggilan])) {
