@@ -531,9 +531,11 @@ async function handleDriverTaskConfirmation(data) {
                 rejectedDriversMap[id_panggilan] = [];
             }
 
-            // 1. Kembalikan status driver penolak menjadi 'siaga'
-            // await db.query(`UPDATE ambulans SET status_operasional = 'Siaga' WHERE id_ambulans = ?`, [id_ambulans]);
-
+            // 1. Update status driver (Jika kendala, set OFFLINE)
+            if (status === 'kendala') {
+                await db.query(`UPDATE ambulans SET status_operasional = 'OFFLINE' WHERE id_ambulans = $1`, [id_ambulans]);
+                logger.info(`Status ${namaDriver} diubah menjadi OFFLINE karena mengalami kendala.`, { category: 'dispatch' });
+            }
             // 3. Masukkan ke daftar hitam (Blacklist) untuk panggilan ini
             if (!rejectedDriversMap[id_panggilan].includes(id_ambulans)) {
                 rejectedDriversMap[id_panggilan].push(id_ambulans);
