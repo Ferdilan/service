@@ -42,6 +42,99 @@ const schemaStatusOp = Joi.object({
 }).or('id_ambulans', 'id_driver').unknown(true);
 // ------------------------------
 
+// --- EMERGENCY SEVERITY INDEX (ESI) ---
+// Mapping kondisi pasien → tingkat kedaruratan (1=tertinggi, 5=terendah)
+const SEVERITY_MAP = {
+    // Level 1 - Resusitasi (Mengancam Jiwa)
+    'henti_jantung': 1, 'tidak_bernapas': 1, 'stroke': 1, 'tenggelam': 1,
+    // Level 2 - Emergensi (Darurat Tinggi)
+    'kecelakaan_berat': 2, 'luka_bakar': 2, 'kejang': 2, 'pendarahan_hebat': 2,
+    // Level 3 - Urgen
+    'patah_tulang': 3, 'sesak_napas': 3, 'kecelakaan_ringan': 3, 'luka_robek': 3,
+    // Level 4 - Semi-Urgen
+    'demam_tinggi': 4, 'nyeri_dada': 4, 'cedera_ringan': 4,
+    // Level 5 - Non-Urgen
+    'transport': 5, 'konsultasi': 5, 'jenazah': 5,
+};
+
+// Fallback berdasarkan jenis_layanan
+const SERVICE_SEVERITY_MAP = { 'DARURAT': 2, 'TRANSPORT': 5, 'JENAZAH': 5 };
+
+// Label visual untuk logging
+const SEVERITY_LABELS = ['', '🔴 RESUSITASI', '🟠 EMERGENSI', '🟡 URGEN', '🟢 SEMI-URGEN', '🔵 NON-URGEN'];
+
+/**
+ * Menghitung severity level berdasarkan kondisi dan jenis_layanan.
+ * @param {object} data - { kondisi, jenis_layanan }
+ * @returns {number} Severity level (1-5)
+ */
+function calculateSeverity(data) {
+    if (data.kondisi && SEVERITY_MAP[data.kondisi]) return SEVERITY_MAP[data.kondisi];
+    if (data.jenis_layanan && SERVICE_SEVERITY_MAP[data.jenis_layanan]) return SERVICE_SEVERITY_MAP[data.jenis_layanan];
+    return 3; // Default: Urgen
+}
+
+/**
+ * Priority Queue berbasis Min-Heap untuk dispatch ambulans.
+ * Panggilan dengan severity TERENDAH (paling darurat) diproses duluan.
+ * Jika severity sama, FCFS (siapa duluan masuk, dia duluan diproses).
+ */
+class EmergencyPriorityQueue {
+    constructor() { this.heap = []; }
+
+    enqueue(callData) {
+        const entry = { ...callData, severity: calculateSeverity(callData), timestamp: Date.now() };
+        this.heap.push(entry);
+        this._bubbleUp(this.heap.length - 1);
+        return entry;
+    }
+
+    dequeue() {
+        if (this.heap.length === 0) return null;
+        const top = this.heap[0];
+        const last = this.heap.pop();
+        if (this.heap.length > 0) { this.heap[0] = last; this._sinkDown(0); }
+        return top;
+    }
+
+    peek() { return this.heap[0] || null; }
+    size() { return this.heap.length; }
+    isEmpty() { return this.heap.length === 0; }
+
+    _compare(a, b) {
+        if (a.severity !== b.severity) return a.severity - b.severity;
+        return a.timestamp - b.timestamp;
+    }
+
+    _bubbleUp(idx) {
+        while (idx > 0) {
+            const parent = Math.floor((idx - 1) / 2);
+            if (this._compare(this.heap[idx], this.heap[parent]) >= 0) break;
+            [this.heap[idx], this.heap[parent]] = [this.heap[parent], this.heap[idx]];
+            idx = parent;
+        }
+    }
+
+    _sinkDown(idx) {
+        const len = this.heap.length;
+        while (true) {
+            let smallest = idx;
+            const l = 2 * idx + 1, r = 2 * idx + 2;
+            if (l < len && this._compare(this.heap[l], this.heap[smallest]) < 0) smallest = l;
+            if (r < len && this._compare(this.heap[r], this.heap[smallest]) < 0) smallest = r;
+            if (smallest === idx) break;
+            [this.heap[idx], this.heap[smallest]] = [this.heap[smallest], this.heap[idx]];
+            idx = smallest;
+        }
+    }
+}
+
+// Instance Priority Queue dan Batch Timer
+const emergencyQueue = new EmergencyPriorityQueue();
+let dispatchTimer = null;
+const BATCH_WINDOW_MS = 3000; // Kumpulkan panggilan selama 3 detik sebelum proses batch
+// ------------------------------------------
+
 // Konfigurasi Koneksi
 const BROKER_URL = process.env.MQTT_BROKER_URL;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
@@ -386,19 +479,24 @@ async function handlePatientRequest(data) {
         console.log(`   Latitude  : ${lokasi_pasien_lat}`);
         console.log(`   Longitude : ${lokasi_pasien_lon}`);
         console.log(`   Jenis     : ${layanan}`);
+
+        // Hitung severity berdasarkan kondisi darurat
+        const severity = calculateSeverity({ kondisi, jenis_layanan: layanan });
+        console.log(`   Kondisi   : ${kondisi || 'Tidak disebutkan'}`);
+        console.log(`   Prioritas : ${SEVERITY_LABELS[severity]} (Level ${severity})`);
         console.log(``);
 
         // Log ke System Monitor
         logger.info(`----------------------------------------------------------------`, { category: 'dispatch' });
-        logger.info(`PANGGILAN DARURAT BARU | Pasien: ${namaPasien}`, { category: 'dispatch' });
-        logger.info(`Lokasi: ${lokasi_pasien_lat}, ${lokasi_pasien_lon} | Jenis: ${layanan}`, { category: 'dispatch' });
+        logger.info(`PANGGILAN DARURAT BARU | ${namaPasien} | ${SEVERITY_LABELS[severity]}`, { category: 'dispatch' });
+        logger.info(`Lokasi: ${lokasi_pasien_lat}, ${lokasi_pasien_lon} | Kondisi: ${kondisi || layanan}`, { category: 'dispatch' });
         logger.info(`----------------------------------------------------------------`, { category: 'dispatch' });
 
-        // Langkah 1: Catat panggilan darurat ke DB untuk mendapatkan ID
+        // Langkah 1: Catat panggilan darurat ke DB (dengan prioritas severity)
         const sqlInsertCall = `
             INSERT INTO transaksi_panggilan
-            (id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan, kondisi, status_panggilan, waktu_panggilan, createdAt, updatedAt)
-            VALUES ($1, $2, $3, $4, $5, 'PENDING', NOW(), NOW(), NOW())
+            (id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, jenis_layanan, kondisi, status_panggilan, prioritas, waktu_panggilan, createdAt, updatedAt)
+            VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, NOW(), NOW(), NOW())
             RETURNING id_panggilan
         `;
         const result = await db.query(sqlInsertCall, [
@@ -406,17 +504,22 @@ async function handlePatientRequest(data) {
             lokasi_pasien_lat,
             lokasi_pasien_lon,
             layanan,
-            kondisi
+            kondisi,
+            severity
         ]);
         newCallId = result.rows[0].id_panggilan;
-        logger.info(`Panggilan baru dari ${namaPasien} dicatat di DB.`, { category: 'dispatch' });
+        logger.info(`Panggilan #${newCallId} dari ${namaPasien} dicatat di DB (Prioritas: ${severity}).`, { category: 'dispatch' });
 
-        // Langkah 2: Temukan driver terbaik menggunakan Hybrid Model (Filter + Refine)
-        logger.info(`Memulai proses pencarian driver...`, { category: 'dispatch' });
-        const bestDriver = await _findBestDriver(patientLocation, newCallId, layanan);
-
-        // Langkah 3: Tugaskan driver dan kirim notifikasi
-        await _assignDriverToCall(bestDriver, newCallId, patientLocation, id_pasien, kondisi);
+        // Langkah 2: Masukkan ke Priority Queue (bukan langsung dispatch)
+        enqueueCall({
+            newCallId,
+            id_pasien,
+            lokasi_pasien_lat,
+            lokasi_pasien_lon,
+            jenis_layanan: layanan,
+            kondisi,
+            namaPasien
+        });
 
     } catch (error) {
         console.error(`Gagal memproses permintaan bantuan:`, error.message);
@@ -425,6 +528,149 @@ async function handlePatientRequest(data) {
         }
     }
 } //End function handlePatientRequest
+
+
+/**
+ * =======================================================
+ * DISPATCH ENGINE (Priority Queue Batch Processing)
+ * =======================================================
+ */
+
+/**
+ * Menambahkan panggilan ke antrian prioritas dan memulai timer batch.
+ * Timer batch mengumpulkan panggilan selama BATCH_WINDOW_MS sebelum memproses.
+ */
+function enqueueCall(callData) {
+    const entry = emergencyQueue.enqueue(callData);
+    logger.info(`[QUEUE] Masuk antrian | ${SEVERITY_LABELS[entry.severity]} | Antrian: ${emergencyQueue.size()} panggilan`, { category: 'dispatch' });
+
+    // Mulai batch timer jika belum berjalan
+    if (!dispatchTimer) {
+        dispatchTimer = setTimeout(() => { processBatch(); }, BATCH_WINDOW_MS);
+    }
+}
+
+/**
+ * Memproses seluruh panggilan di antrian berdasarkan prioritas.
+ * Panggilan dengan severity terendah (paling darurat) diproses lebih dulu.
+ * Jika ambulans habis, sisa panggilan masuk status QUEUED di database.
+ */
+async function processBatch() {
+    dispatchTimer = null;
+    if (emergencyQueue.isEmpty()) return;
+
+    const batchSize = emergencyQueue.size();
+    console.log(`\n================================================================`);
+    console.log(` BATCH DISPATCH: Memproses ${batchSize} panggilan berdasarkan prioritas`);
+    console.log(`================================================================\n`);
+    logger.info(`[BATCH] Memulai batch dispatch untuk ${batchSize} panggilan.`, { category: 'dispatch' });
+
+    const availableCount = await getAvailableAmbulanceCount();
+    let dispatched = 0;
+
+    while (!emergencyQueue.isEmpty()) {
+        const call = emergencyQueue.dequeue();
+        const label = SEVERITY_LABELS[call.severity] || `Level ${call.severity}`;
+        console.log(`  [${dispatched + 1}/${batchSize}] ${label} | Pasien: ${call.namaPasien || call.id_pasien} | Kondisi: ${call.kondisi || call.jenis_layanan}`);
+
+        if (dispatched < availableCount) {
+            try {
+                await dispatchCall(call);
+                dispatched++;
+            } catch (err) {
+                console.error(`    Dispatch gagal: ${err.message}`);
+                logger.error(`[BATCH] Dispatch gagal untuk panggilan #${call.newCallId}: ${err.message}`, { category: 'dispatch' });
+                await markAsWaiting(call);
+            }
+        } else {
+            console.log(`    Semua ambulans sibuk. Masuk WAITING QUEUE...`);
+            await markAsWaiting(call);
+        }
+    }
+
+    console.log(`\n  Hasil: ${dispatched} dispatch berhasil, ${batchSize - dispatched} menunggu di antrian.\n`);
+    logger.info(`[BATCH] Selesai: ${dispatched} dispatch, ${batchSize - dispatched} menunggu.`, { category: 'dispatch' });
+}
+
+/**
+ * Men-dispatch satu panggilan: mencari driver terbaik dan menugaskannya.
+ * Menggunakan algoritma Hybrid Model (Haversine + Google Distance Matrix) yang sudah ada.
+ */
+async function dispatchCall(callData) {
+    const patientLocation = { latitude: callData.lokasi_pasien_lat, longitude: callData.lokasi_pasien_lon };
+    logger.info(`[DISPATCH] Mencari driver untuk panggilan #${callData.newCallId}...`, { category: 'dispatch' });
+    const bestDriver = await _findBestDriver(patientLocation, callData.newCallId, callData.jenis_layanan);
+    await _assignDriverToCall(bestDriver, callData.newCallId, patientLocation, callData.id_pasien, callData.kondisi);
+}
+
+/**
+ * Menghitung jumlah ambulans yang saat ini berstatus AVAILABLE.
+ * @returns {Promise<number>} Jumlah ambulans tersedia.
+ */
+async function getAvailableAmbulanceCount() {
+    const result = await db.query(`SELECT COUNT(*) as count FROM ambulans WHERE status_operasional = 'AVAILABLE'`);
+    return parseInt(result.rows[0].count);
+}
+
+/**
+ * Menandai panggilan sebagai QUEUED di database (menunggu ambulans bebas).
+ * Panggilan QUEUED akan otomatis di-dispatch saat ada ambulans yang selesai tugas.
+ */
+async function markAsWaiting(callData) {
+    try {
+        await db.query(
+            `UPDATE transaksi_panggilan SET status_panggilan = 'QUEUED', prioritas = $1 WHERE id_panggilan = $2`,
+            [callData.severity, callData.newCallId]
+        );
+        logger.info(`[QUEUE] Panggilan #${callData.newCallId} masuk antrian tunggu (Prioritas: ${callData.severity}).`, { category: 'dispatch' });
+    } catch (err) {
+        console.error(`[QUEUE] Gagal menandai panggilan #${callData.newCallId} sebagai QUEUED:`, err.message);
+    }
+}
+
+/**
+ * Memeriksa apakah ada panggilan yang menunggu di antrian setelah ambulans bebas.
+ * Dipanggil otomatis ketika driver menyelesaikan tugas (status 'selesai').
+ * Mengambil panggilan QUEUED dengan prioritas tertinggi (severity terendah).
+ */
+async function checkWaitingQueue(freedAmbulanceId) {
+    try {
+        const result = await db.query(`
+            SELECT id_panggilan, id_pasien, lokasi_pasien_lat, lokasi_pasien_lon, 
+                   jenis_layanan, kondisi, prioritas
+            FROM transaksi_panggilan 
+            WHERE status_panggilan = 'QUEUED' 
+            ORDER BY prioritas ASC, waktu_panggilan ASC 
+            LIMIT 1
+        `);
+
+        if (result.rows.length > 0) {
+            const nextCall = result.rows[0];
+            const label = SEVERITY_LABELS[nextCall.prioritas] || `Level ${nextCall.prioritas}`;
+
+            console.log(`\n================================================================`);
+            console.log(` AUTO-DISPATCH: Ambulans ${freedAmbulanceId} bebas`);
+            console.log(` -> Dispatch panggilan #${nextCall.id_panggilan} (${label})`);
+            console.log(`================================================================\n`);
+            logger.info(`[AUTO-DISPATCH] Ambulans ${freedAmbulanceId} bebas -> Panggilan #${nextCall.id_panggilan} (${label})`, { category: 'dispatch' });
+
+            const patientLocation = {
+                latitude: parseFloat(nextCall.lokasi_pasien_lat),
+                longitude: parseFloat(nextCall.lokasi_pasien_lon)
+            };
+
+            // Update status dari QUEUED ke PENDING sebelum dispatch
+            await db.query(`UPDATE transaksi_panggilan SET status_panggilan = 'PENDING' WHERE id_panggilan = $1`, [nextCall.id_panggilan]);
+
+            const bestDriver = await _findBestDriver(patientLocation, nextCall.id_panggilan, nextCall.jenis_layanan);
+            await _assignDriverToCall(bestDriver, nextCall.id_panggilan, patientLocation, nextCall.id_pasien, nextCall.kondisi);
+        } else {
+            console.log(`[AUTO-DISPATCH] Tidak ada panggilan dalam antrian tunggu.`);
+        }
+    } catch (err) {
+        console.error(`[AUTO-DISPATCH] Gagal memproses antrian tunggu:`, err.message);
+    }
+}
 
 
 /**
@@ -613,6 +859,8 @@ async function handleDriverTaskConfirmation(data) {
             console.log(`================================================================\n`);
             logger.info(`Tugas Selesai. ${namaDriver} kembali available.`, { category: 'dispatch' });
 
+            // Cek antrian: apakah ada panggilan QUEUED yang menunggu?
+            await checkWaitingQueue(id_ambulans);
 
         }
     } catch (error) {
@@ -755,7 +1003,7 @@ async function handleDriverCancellation(data) {
                 logger.info(`[PEMBATALAN DRIVER] Sinyal batal berhasil dikirim ke pasien ${row.id_pasien}`, { category: 'dispatch' });
             }
         } else {
-             logger.error(`[PEMBATALAN DRIVER] Panggilan ${validId} tidak ditemukan atau sudah batal.`, { category: 'dispatch' });
+            logger.error(`[PEMBATALAN DRIVER] Panggilan ${validId} tidak ditemukan atau sudah batal.`, { category: 'dispatch' });
         }
     } catch (error) {
         logger.error(`[PEMBATALAN DRIVER] Gagal memproses pembatalan: ${error.message}`, { category: 'dispatch' });
