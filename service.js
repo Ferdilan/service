@@ -1,4 +1,6 @@
 // --- KONFIGURASI ---
+const fs = require('fs');
+const path = require('path');
 const mqtt = require('mqtt');
 const Joi = require('joi');
 const db = require('./db.js');
@@ -770,6 +772,123 @@ async function handleDriverCancellation(data) {
  */
 
 /**
+ * Menyusun parameter request untuk Google Distance Matrix API.
+ * Menggunakan mode 'driving' dan departure_time 'now' untuk traffic-aware ETA.
+ */
+function _buildDistanceMatrixParams(patientLocation, candidates, apiKey = GOOGLE_MAPS_API_KEY) {
+    const origins = [patientLocation];
+    const destinations = candidates.map(c => c.location);
+    return {
+        key: apiKey,
+        origins: origins,
+        destinations: destinations,
+        mode: 'driving',
+        departure_time: 'now'
+    };
+}
+
+/**
+ * Memproses elemen hasil respon Google Distance Matrix API.
+ * Menerapkan traffic-aware ETA dengan fallback ke duration statis,
+ * serta mencatat detail numerik ke log dan file logs/dispatch-candidates.jsonl.
+ */
+function _processDistanceMatrixElements(candidates, apiResponse, newCallId = null, logTarget = logger) {
+    const results = [];
+    let allFallback = true;
+    const nowIso = new Date().toISOString();
+
+    if (!apiResponse || !apiResponse.data || !apiResponse.data.rows || !apiResponse.data.rows[0] || !apiResponse.data.rows[0].elements) {
+        return { results, allFallback: false };
+    }
+
+    apiResponse.data.rows[0].elements.forEach((element, index) => {
+        const candidate = candidates[index];
+        if (!candidate) return;
+
+        if (element.status === 'OK') {
+            const api_distance_text = element.distance ? element.distance.text : '';
+            const api_distance_value = element.distance ? element.distance.value : 0;
+            const api_duration_text = element.duration ? element.duration.text : '';
+            const api_duration_seconds = element.duration ? element.duration.value : 0;
+
+            let etaSeconds;
+            let etaSource;
+            let durationInTrafficSeconds = null;
+            let durationInTrafficText = null;
+
+            if (element.duration_in_traffic && typeof element.duration_in_traffic.value === 'number') {
+                durationInTrafficSeconds = element.duration_in_traffic.value;
+                durationInTrafficText = element.duration_in_traffic.text;
+                etaSeconds = durationInTrafficSeconds;
+                etaSource = 'duration_in_traffic';
+                allFallback = false;
+            } else {
+                etaSeconds = api_duration_seconds;
+                etaSource = 'duration';
+            }
+
+            const candidateLogData = {
+                callId: newCallId,
+                candidateId: candidate.id,
+                candidateName: candidate.nama,
+                haversineMeters: candidate.distanceHaversine,
+                durationSeconds: api_duration_seconds,
+                durationInTrafficSeconds: durationInTrafficSeconds,
+                etaSeconds: etaSeconds,
+                etaSource: etaSource,
+                distanceMeters: api_distance_value,
+                timestamp: nowIso
+            };
+
+            // Simpan ke file JSON lines (logs/dispatch-candidates.jsonl)
+            try {
+                const logDir = path.join(__dirname, 'logs');
+                if (!fs.existsSync(logDir)) {
+                    fs.mkdirSync(logDir, { recursive: true });
+                }
+                fs.appendFileSync(path.join(logDir, 'dispatch-candidates.jsonl'), JSON.stringify(candidateLogData) + '\n', 'utf8');
+            } catch (errLog) {
+                console.error('[LOG FILE] Gagal menulis ke dispatch-candidates.jsonl:', errLog.message);
+            }
+
+            console.log(` ${candidate.nama.padEnd(16)}| ${String(candidate.distanceHaversine).padStart(13)} | ${api_distance_text.padEnd(15)}| ${durationInTrafficText ? `${durationInTrafficText} (traffic)` : api_duration_text}`);
+            if (logTarget && typeof logTarget.info === 'function') {
+                logTarget.info(`  -> ${candidate.nama.padEnd(15)} (Hav: ${candidate.distanceHaversine} m) | Rute: ${api_distance_text} | ETA: ${api_duration_text} | Traffic: ${durationInTrafficText || '-'} | Used: ${etaSource} (${etaSeconds}s)`, {
+                    category: 'dispatch',
+                    metadata: candidateLogData
+                });
+            }
+
+            results.push({
+                id: candidate.id,
+                nama: candidate.nama,
+                etaSeconds: etaSeconds,
+                etaSource: etaSource,
+                distanceMeters: api_distance_value,
+                distanceText: api_distance_text,
+                durationText: api_duration_text,
+                durationInTrafficText: durationInTrafficText,
+                haversineMeters: candidate.distanceHaversine,
+                durationSeconds: api_duration_seconds,
+                durationInTrafficSeconds: durationInTrafficSeconds
+            });
+        } else {
+            if (logTarget && typeof logTarget.warn === 'function') {
+                logTarget.warn(`  -> ${candidate.nama}: Google API Gagal (Status: ${element.status})`, { category: 'dispatch' });
+            }
+        }
+    });
+
+    if (results.length > 0 && allFallback) {
+        if (logTarget && typeof logTarget.warn === 'function') {
+            logTarget.warn("duration_in_traffic tidak tersedia pada seluruh elemen", { category: 'dispatch' });
+        }
+    }
+
+    return { results, allFallback };
+}
+
+/**
  * [HELPER UNTUK T3] Menjalankan logika Hybrid Model (Filter + Refine).
  * @param {object} patientLocation - Objek { latitude, longitude } pasien.
  * @param {number} newCallId - ID panggilan darurat yang baru dibuat.
@@ -875,28 +994,15 @@ async function _findBestDriver(patientLocation, newCallId, jenisLayanan, exclude
     const origins = [patientLocation];
     const destinations = candidates.map(c => c.location);
 
-    const apiResponse = await gmapsClient.distancematrix({
-        params: { key: GOOGLE_MAPS_API_KEY, origins: origins, destinations: destinations, travelMode: 'DRIVING' } //travel mode untuk mobil
-    });
+    const matrixParams = _buildDistanceMatrixParams(patientLocation, candidates);
+    const apiResponse = await gmapsClient.distancematrix({ params: matrixParams });
 
-    console.log(``);
-    console.log(` Driver          | Haversine (m) | Jarak Rute     | Waktu Tempuh`);
+    console.log(`\n Driver          | Haversine (m) | Jarak Rute     | Waktu Tempuh`);
     console.log(`----------------------------------------------------------------`);
     logger.info(`--- HASIL PERHITUNGAN ---`, { category: 'dispatch' });
-    const results = [];
-    apiResponse.data.rows[0].elements.forEach((element, index) => {
-        const candidate = candidates[index];
-        if (element.status === 'OK') {
-            const api_distance_text = element.distance.text;
-            const api_duration_text = element.duration.text;
-            const api_duration_seconds = element.duration.value;
-            console.log(` ${candidate.nama.padEnd(16)}| ${String(candidate.distanceHaversine).padStart(13)} | ${api_distance_text.padEnd(15)}| ${api_duration_text}`);
-            logger.info(`  -> ${candidate.nama.padEnd(15)} (Hav: ${candidate.distanceHaversine} m) | Rute: ${api_distance_text} | ETA: ${api_duration_text}`, { category: 'dispatch' });
-            results.push({ id: candidate.id, nama: candidate.nama, etaSeconds: api_duration_seconds, distanceMeters: element.distance.value, distanceText: api_distance_text, durationText: api_duration_text });
-        } else {
-            logger.warn(`  -> ${candidate.nama}: Google API Gagal (Status: ${element.status})`, { category: 'dispatch' });
-        }
-    });
+
+    const { results } = _processDistanceMatrixElements(candidates, apiResponse, newCallId, logger);
+
     console.log(`----------------------------------------------------------------`);
     console.log(` Validasi: Jarak Rute selalu >= Haversine [VALID]`);
 
@@ -1074,3 +1180,10 @@ async function _assignDriverToCall(bestDriver, callId, patientLocation, id_pasie
         }
     }, 20000); // 20000 ms = 20 detik
 } //End _assignDriverToCall
+
+module.exports = {
+    _findBestDriver,
+    _assignDriverToCall,
+    _buildDistanceMatrixParams,
+    _processDistanceMatrixElements
+};

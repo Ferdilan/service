@@ -111,3 +111,4 @@ GitHub menyimpan referensi dangling commit (cache PR, commit view via direct has
 - **Repositori Frontend / Mobile / Material**:
   Terdeteksi bahwa materi pengujian dan repositori pendukung aplikasi mobile mungkin juga menyimpan data seed dengan nama driver asli atau log koordinat.
   *Tindakan*: Lakukan audit mandiri pada repositori klien Android / frontend untuk memastikan tidak ada nama driver asli, data NIK, atau foto KTP uji yang tersimpan di aset atau riwayat commit repositori tersebut.
+
