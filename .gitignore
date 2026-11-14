@@ -1,8 +1,17 @@
 # File environment (rahasia)
 .env
+.env.*
+!.env.example
 
 # Dependensi Node.js
 node_modules/
 
-# File log
+# Database dumps and exports (PII data)
+*.sql
+
+# File log dan folder log
 *.log
+logs/
+
+# Hasil stress test dan evaluasi
+*.csv
