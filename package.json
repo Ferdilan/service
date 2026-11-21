@@ -11,6 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-location": "^3.1171.0",
     "@googlemaps/google-maps-services-js": "^3.4.0",
     "dotenv": "^16.4.5",
     "geolib": "^3.3.4",

@@ -76,3 +76,21 @@ Karena implementasi kini beralih ke **Traffic-Aware ETA (Jalur B)**, hasil empir
    - Perbarui pseudocode untuk mencerminkan evaluasi bersyarat antara `duration_in_traffic` dan `duration`.
 4. **Section 4 (Results & Discussion)**:
    - Masukkan tabel dan grafik hasil eksperimen baru dari pengujian QoS, akurasi seleksi lalu lintas, dan stress test terdistribusi.
+
+---
+
+## 5. Migrasi Provider Routing: Google Maps ke Amazon Location Service (AWS)
+
+Sehubungan dengan keterbatasan penggunaan Google Maps API, modul routing Tahap 2 dialihkan ke **Amazon Location Service (AWS)**:
+
+- **Layanan yang Digunakan**: `CalculateRouteMatrix` (Routes API via `@aws-sdk/client-location`).
+- **Alasan Pemilihan `CalculateRouteMatrix`**:
+  - Efisien untuk pola 1 asal (pasien) ke $k=5$ tujuan (kandidat armada) dalam 1 panggilan API.
+  - Mendukung parameter `DepartureTime: new Date()` untuk perhitungan rute berbasis kondisi kemacetan lalu lintas real-time (*traffic-aware*).
+  - Format koordinat disesuaikan ke standar GeoJSON `[longitude, latitude]`.
+- **Mekanisme Ketahanan (Resilient Fallback)**:
+  - Jika AWS Location Service mengalami gangguan jaringan, kendala kuota, atau timeout, sistem secara otomatis fallback ke pemeringkatan jarak *Haversine* sehingga proses panggilan ambulans darurat tetap berjalan tanpa henti.
+- **Artefak Terkait**:
+  - Skrip verifikasi mandiri: [`scripts/verify-aws-routing.js`](scripts/verify-aws-routing.js)
+  - Unit test mock AWS: [`test/aws_route_matrix.test.js`](test/aws_route_matrix.test.js)
+  - Dokumentasi perencanaan arsitektur: [`perencanaan_migrasi_aws_location.md`](../.gemini/antigravity/brain/dd8b7aea-2371-475a-a4cb-fb3b8e6f2a9c/perencanaan_migrasi_aws_location.md)

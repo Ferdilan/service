@@ -13,7 +13,7 @@ class MqttTransport extends winston.Transport {
             this.emit('logged', info);
         });
 
-        // Hanya kirim ke MQTT jika kategori adalah 'dispatch'
+        // Only send to MQTT if category is 'dispatch'
         if (this.mqttClient && this.mqttClient.connected && info.category === 'dispatch') {
             const payload = JSON.stringify({
                 level: info.level,
@@ -42,7 +42,7 @@ const logger = winston.createLogger({
     ]
 });
 
-// Fungsi untuk menghubungkan MQTT client ke logger
+// Function to attach MQTT client to logger
 logger.setMqttClient = (client) => {
     logger.add(new MqttTransport({ mqttClient: client }));
 };
