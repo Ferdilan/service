@@ -1,9 +1,18 @@
 # File environment (rahasia)
 .env
+.env.*
+!.env.example
 
-# Dependensi Node.js
+# Node dependencies
 node_modules/
 
-# File log
-*.log"logs/dispatch-candidates.jsonl" 
-"logs/dispatch-candidates.jsonl" 
+# Logs
+*.log
+logs/
+logs/dispatch-candidates.jsonl
+
+# Database dumps and exports (PII data)
+*.sql
+
+# Stress test results
+*.csv
