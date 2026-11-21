@@ -5,4 +5,5 @@
 node_modules/
 
 # File log
-*.log
+*.log"logs/dispatch-candidates.jsonl" 
+"logs/dispatch-candidates.jsonl" 
