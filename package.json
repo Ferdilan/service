@@ -4,8 +4,8 @@
   "description": "MQTT-based ambulance dispatch engine service",
   "main": "service.js",
   "scripts": {
-    "start": "node servicesec.js",
-    "dev": "nodemon servicesec.js"
+    "start": "node service.js",
+    "dev": "nodemon service.js"
   },
   "keywords": [],
   "author": "",
