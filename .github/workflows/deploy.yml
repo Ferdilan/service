@@ -1,86 +1,104 @@
-name: Deploy Service to VPS
+name: 🚀 Deploy to EC2
 
 on:
   push:
-    branches:
-      - main  # Trigger saat push ke branch main
+    branches: [ main ]          # ubah bila branch lain dipakai
+  workflow_dispatch:           # memungkinkan deploy manual dari UI
 
 jobs:
-  deploy:
-    name: Build & Deploy
+  build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
+    # ------------------------------------------------------------------
+    # Set up SSH (private key) & known‑hosts
+    # ------------------------------------------------------------------
     steps:
-      # 1. Checkout kode dari GitHub
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Setup Node.js
-      - name: Setup Node.js
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      # ------------------------------------------------------------------
+      # Node.js setup & install deps
+      # ------------------------------------------------------------------
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
           cache: 'npm'
 
-      # 3. Install dependencies & Test/Lint
-      - name: Install dependencies and syntax check
+      - name: Install npm dependencies
+        run: npm ci
+
+      # ------------------------------------------------------------------
+      # Run tests (optional – delete if you have none)
+      # ------------------------------------------------------------------
+      - name: Run tests
+        run: npm test
+        continue-on-error: false   # set true to ignore test failures
+
+      # ------------------------------------------------------------------
+      # Build (if your project has a build step)
+      # ------------------------------------------------------------------
+      - name: Build
+        run: npm run build --if-present
+
+      # ------------------------------------------------------------------
+      # Package artefak (optional – tar untuk transfer)
+      # ------------------------------------------------------------------
+      - name: Create tarball
         run: |
-          npm ci
-          node --check service.js
-
-      # 4. Backup state at VPS before deployment for Rollback
-      - name: Backup VPS State
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd /home/ubuntu/service 
-            # Backup git hash
-            git rev-parse HEAD > .deploy_prev_commit || echo "" > .deploy_prev_commit
-
-      # 5. Deploy to VPS via SSH with Rollback Mechanism
-      - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.0.3
+          tar czf app.tar.gz . \
+            --exclude=".git" \
+            --exclude="node_modules" \
+            --exclude="*.log"
+      
+      # ------------------------------------------------------------------
+      # Upload artefak ke EC2 via rsync (preserves permissions)
+      # ------------------------------------------------------------------
+      - name: Sync files to EC2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_ROOT: ${{ secrets.APP_ROOT }}
+        run: |
+          rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes" \
+            --exclude=".git/" \
+            --exclude="node_modules/" \
+            --delete \
+            ./ "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:${APP_ROOT}/"
+
+      # ------------------------------------------------------------------
+      # Install npm deps on the server (kecepatan lebih baik daripada
+      #    mengirim node_modules)
+      # ------------------------------------------------------------------
+      - name: Install server‑side deps
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "cd ${{ secrets.APP_ROOT }} && npm ci --production"
+
+      # ------------------------------------------------------------------
+      # Restart systemd service (PM2 will be managed by it)
+      # ------------------------------------------------------------------
+      - name: Restart myapp.service
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "sudo systemctl restart myapp.service"
+
+      # ------------------------------------------------------------------
+      # (Opsional) Slack notification
+      # ------------------------------------------------------------------
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.23.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: GITHUB_TOKEN
-          script: |
-            set -e
-            cd /home/ubuntu/service
-
-            # Function to handle rollback
-            rollback() {
-              echo "=== Deploy failed! Initiating rollback... ==="
-              PREV_COMMIT=$(cat .deploy_prev_commit)
-              if [ -n "$PREV_COMMIT" ]; then
-                git reset --hard $PREV_COMMIT
-                npm install --omit=dev
-              fi
-              
-              pm2 restart ambulance-service --update-env || true
-              echo "=== Rollback completed. ==="
-              exit 1
+          payload: |
+            {
+              "text": "*Deploy* ${{ github.repository }} `${{ github.ref }}` ${{ job.status }} on *${{ secrets.EC2_HOST }}*"
             }
-
-            # Trap errors to automatically trigger rollback
-            trap 'rollback' ERR
-
-            echo "=== Pulling latest code ==="
-            git remote set-url origin https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git
-            git fetch origin main
-            git reset --hard origin/main
-
-            echo "=== Installing dependencies ==="
-            npm install --omit=dev
-
-            echo "=== Restarting service ==="
-            pm2 restart ambulance-service --update-env
-            pm2 save
-
-            echo "=== Deploy selesai! ==="
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
